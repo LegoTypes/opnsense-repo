@@ -12,14 +12,13 @@ jobs:
           run: |
             set -e
             git clone --depth 50 --branch add-wg-ipv6-gateway https://github.com/LegoTypes/plugins.git plugins
-            make -C plugins/net/wg-client-tunnels package
+            make -C plugins/net/wg-client-tunnels package PLUGIN_DEVEL= PLUGIN_PHP=85 PLUGIN_PYTHON=313
             for p in plugins/net/wg-client-tunnels/work/pkg/*.pkg; do
               echo "=== $p"
               pkg info -F "$p" | head -14
               echo "--- abi"
               pkg query -F "$p" '%q'
-              echo "--- files"
-              pkg info -l -F "$p"
-              echo "--- +POST_INSTALL"
-              tar -xOf "$p" +POST_INSTALL || true
+              echo "--- files: $(pkg info -l -F "$p" | grep -c /usr/local/)"
+              echo "--- scripts"
+              pkg info -R --raw-format ucl -F "$p" | sed -n '/^scripts/,/^}/p' | head -60
             done
