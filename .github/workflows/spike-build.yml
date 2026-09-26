@@ -1,0 +1,25 @@
+name: spike-build
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15.0"
+          usesh: true
+          prepare: pkg install -y git
+          run: |
+            set -e
+            git clone --depth 50 --branch add-wg-ipv6-gateway https://github.com/LegoTypes/plugins.git plugins
+            make -C plugins/net/wg-client-tunnels package
+            for p in plugins/net/wg-client-tunnels/work/pkg/*.pkg; do
+              echo "=== $p"
+              pkg info -F "$p" | head -14
+              echo "--- abi"
+              pkg query -F "$p" '%q'
+              echo "--- files"
+              pkg info -l -F "$p"
+              echo "--- +POST_INSTALL"
+              tar -xOf "$p" +POST_INSTALL || true
+            done
