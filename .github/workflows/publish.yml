@@ -52,8 +52,14 @@ jobs:
             mkdir -p "$R/All"
             cp p-wg/net/wg-client-tunnels/work/pkg/*.pkg p-avahi/net/avahi-reflector/work/pkg/*.pkg \
                p-mac/net/mac-alias-cache/work/pkg/*.pkg p-wg/vendor/legotypes/work/pkg/*.pkg "$R/All/"
-            pkg repo "$R" .signing/key
-            rm -f .signing/key
+            # signing_command mode (pkg-repo(8)): the repository carries the
+            # signature and the public key, so clients check the key's sha256
+            # against their trusted fingerprints (signature_type "fingerprints")
+            printf '%s\n' '#!/bin/sh' 'read -t 2 sum' '[ -n "$sum" ] || exit 1' 'echo SIGNATURE' \
+              'printf %s "$sum" | /usr/bin/openssl dgst -sign .signing/key -sha256 -binary' 'echo' \
+              'echo CERT' 'cat keys/legotypes-pkg-signing.pub' 'echo END' > .signing/sign.sh
+            pkg repo "$R" signing_command: /bin/sh .signing/sign.sh
+            rm -f .signing/key .signing/sign.sh
             cp "$R"/All/os-legotypes-*.pkg site/os-legotypes.pkg
             cp keys/legotypes-pkg-signing.pub site/legotypes-pkg-signing.pub
             for p in "$R"/All/*.pkg; do pkg info -F "$p" | head -3; echo; done > site/packages.txt
