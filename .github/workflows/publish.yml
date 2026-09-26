@@ -16,8 +16,12 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # PKG_SIGNING_KEY is a secret of the "release" environment, which runs only
+    # from main and only after the owner approves the run. Every action is pinned
+    # to a commit (the repository requires it): the key passes through the VM.
+    environment: release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # The signing key goes into the workspace (synced into the VM), never
       # into site/, and is removed in the VM right after signing and on the
@@ -31,7 +35,7 @@ jobs:
           printf '%s\n' "$PKG_SIGNING_KEY" > .signing/key
 
       - name: Build and sign in FreeBSD 15
-        uses: vmactions/freebsd-vm@v1
+        uses: vmactions/freebsd-vm@a2f9a41fa97f6848b8c3b791087dfcdaa5b473ff # v1.5.8
         with:
           release: "15.0"
           usesh: true
@@ -70,7 +74,7 @@ jobs:
         if: always()
         run: rm -rf .signing
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: site
 
@@ -91,4 +95,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
