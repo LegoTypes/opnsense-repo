@@ -18,10 +18,14 @@ jobs:
     runs-on: ubuntu-latest
     # PKG_SIGNING_KEY is a secret of the "release" environment, which runs only
     # from main and only after the owner approves the run. Every action is pinned
-    # to a commit (the repository requires it): the key passes through the VM.
+    # to a commit, and so must every action those actions use (the repository
+    # requires it): the key passes through the VM.
     environment: release
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # no token in .git: the workspace is copied into the build VM
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # The signing key goes into the workspace (synced into the VM), never
       # into site/, and is removed in the VM right after signing and on the
@@ -74,7 +78,7 @@ jobs:
         if: always()
         run: rm -rf .signing
 
-      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site
 
@@ -95,4 +99,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
