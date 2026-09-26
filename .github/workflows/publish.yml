@@ -1,0 +1,88 @@
+name: publish
+
+# Build the LegoTypes OPNsense packages in a FreeBSD 15 VM, sign the catalog,
+# publish the repository on GitHub Pages and keep the packages as a release.
+on: workflow_dispatch
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The signing key goes into the workspace (synced into the VM), never
+      # into site/, and is removed in the VM right after signing and on the
+      # runner in the step after.
+      - name: Stage the signing key
+        env:
+          PKG_SIGNING_KEY: ${{ secrets.PKG_SIGNING_KEY }}
+        run: |
+          umask 077
+          mkdir -p .signing
+          printf '%s\n' "$PKG_SIGNING_KEY" > .signing/key
+
+      - name: Build and sign in FreeBSD 15
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15.0"
+          usesh: true
+          prepare: pkg install -y git
+          run: |
+            set -e
+            umask 022
+            ARGS="PLUGIN_DEVEL= PLUGIN_PHP=85 PLUGIN_PYTHON=313"
+            git clone --depth 1 --branch add-wg-ipv6-gateway https://github.com/LegoTypes/plugins.git p-wg
+            git clone --depth 1 --branch add-avahi-reflector https://github.com/LegoTypes/plugins.git p-avahi
+            git clone --depth 1 --branch add-mac-alias-cache https://github.com/LegoTypes/plugins.git p-mac
+            cp -R vendor/legotypes p-wg/vendor/legotypes
+            make -C p-wg/net/wg-client-tunnels package $ARGS
+            make -C p-avahi/net/avahi-reflector package $ARGS
+            make -C p-mac/net/mac-alias-cache package $ARGS
+            make -C p-wg/vendor/legotypes package $ARGS
+            R="site/FreeBSD:15:amd64/26.7/latest"
+            mkdir -p "$R/All"
+            cp p-wg/net/wg-client-tunnels/work/pkg/*.pkg p-avahi/net/avahi-reflector/work/pkg/*.pkg \
+               p-mac/net/mac-alias-cache/work/pkg/*.pkg p-wg/vendor/legotypes/work/pkg/*.pkg "$R/All/"
+            pkg repo "$R" .signing/key
+            rm -f .signing/key
+            cp "$R"/All/os-legotypes-*.pkg site/os-legotypes.pkg
+            cp keys/legotypes-pkg-signing.pub site/legotypes-pkg-signing.pub
+            for p in "$R"/All/*.pkg; do pkg info -F "$p" | head -3; echo; done > site/packages.txt
+            cat site/packages.txt
+            ls -l "$R"
+
+      - name: Remove the signing key from the runner
+        if: always()
+        run: rm -rf .signing
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Keep the packages as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "publish-${{ github.run_number }}" \
+            site/FreeBSD:15:amd64/26.7/latest/All/*.pkg \
+            --title "Packages, publish ${{ github.run_number }}" \
+            --notes "OPNsense 26.7 (FreeBSD:15:amd64) packages as published in run ${{ github.run_number }}."
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

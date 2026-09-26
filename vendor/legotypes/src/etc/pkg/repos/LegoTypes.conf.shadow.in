@@ -1,0 +1,7 @@
+LegoTypes: {
+  fingerprints: "/usr/local/etc/pkg/fingerprints/LegoTypes",
+  url: "https://legotypes.github.io/opnsense-repo/${ABI}/%%PLUGIN_ABI%%/latest",
+  signature_type: "fingerprints",
+  priority: 5,
+  enabled: yes
+}
