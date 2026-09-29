@@ -3,15 +3,8 @@ LegoTypes package repository to the firmware, so its plugins appear under
 System > Firmware > Plugins and update with firmware updates. Packages are
 signed; the repository's key fingerprint is installed with this package.
 
-Plugins from this repository:
-
-- os-wg-client-tunnels (VPN > WireGuard > Upstream tunnels): builds,
-  enforces and maintains policy-routed WireGuard VPN upstreams from a
-  provider's config file
-- os-avahi-reflector: an Avahi mDNS/DNS-SD reflector for cross-VLAN service
-  discovery
-- os-mac-alias-cache: rebuilds MAC firewall aliases from current host
-  discovery data
+The plugins it provides, and what each does, are listed at
+https://legotypes.github.io/
 
 Uninstalling this package removes the repository again; plugins already
 installed from it stay installed until removed.

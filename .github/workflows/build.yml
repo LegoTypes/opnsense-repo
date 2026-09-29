@@ -1,0 +1,117 @@
+name: build
+
+# One package from packages.conf, built in a FreeBSD 15 VM. For a catalogue
+# package, every other catalogue package is carried forward from its release,
+# the catalogue is signed and the Pages site uploaded for the caller to deploy.
+# The build is left as the artifact "package" (out/: the .pkg and out/source);
+# the caller turns it into a release once everything else has succeeded.
+on:
+  workflow_call:
+    inputs:
+      package:
+        type: string
+        required: true
+      catalogue:
+        type: boolean
+        required: true
+    outputs:
+      tag:
+        description: The release tag the build will get, <name>-<version>
+        value: ${{ jobs.build.outputs.tag }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # PKG_SIGNING_KEY is a secret of the "release" environment, which runs only
+    # from main and only after the owner approves the run. A job calling a
+    # reusable workflow cannot name an environment, so it is named here: every
+    # build waits for approval. This job only reads the repository; the release
+    # is written by the caller. Every action is pinned to a commit, and so must
+    # every action those actions use (the repository requires it): the key
+    # passes through the VM.
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+    env:
+      PACKAGE: ${{ inputs.package }}
+      CATALOGUE: ${{ inputs.catalogue }}
+    steps:
+      # no token in .git: the workspace is copied into the build VM
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the package against packages.conf
+        run: |
+          row=$(sh scripts/packages.sh row "$PACKAGE")
+          read -r _repo _branch _dir listed <<<"$row"
+          want=no
+          [ "$CATALOGUE" != true ] || want=yes
+          if [ "$listed" != "$want" ]; then
+            echo "::error::$PACKAGE has catalogue=$listed in packages.conf; this workflow builds catalogue=$want packages"
+            exit 1
+          fi
+
+      - name: Carry forward the other catalogue packages
+        if: inputs.catalogue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash scripts/carry-forward.sh "$PACKAGE" "site/FreeBSD:15:amd64/26.7/latest/All"
+
+      # The signing key goes into the workspace (synced into the VM), never
+      # into site/, and is removed in the VM right after signing and on the
+      # runner in the step after.
+      - name: Stage the signing key
+        if: inputs.catalogue
+        env:
+          PKG_SIGNING_KEY: ${{ secrets.PKG_SIGNING_KEY }}
+        run: |
+          umask 077
+          mkdir -p .signing
+          printf '%s\n' "$PKG_SIGNING_KEY" > .signing/key
+
+      - name: Build in FreeBSD 15
+        uses: vmactions/freebsd-vm@a2f9a41fa97f6848b8c3b791087dfcdaa5b473ff # v1.5.8
+        with:
+          release: "15.0"
+          usesh: true
+          envs: PACKAGE CATALOGUE GITHUB_REPOSITORY GITHUB_SHA
+          prepare: pkg install -y git
+          run: |
+            set -e
+            umask 022
+            sh scripts/build-package.sh "$PACKAGE"
+            if [ "$CATALOGUE" = true ]; then
+              sh scripts/sign-catalogue.sh
+            fi
+
+      - name: Remove the signing key from the runner
+        if: always()
+        run: rm -rf .signing
+
+      - name: Check the version is new
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag=$(bash scripts/release.sh check out/*.pkg)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: package
+          path: out/
+          if-no-files-found: error
+
+      - if: inputs.catalogue
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
