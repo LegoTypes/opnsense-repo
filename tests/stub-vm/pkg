@@ -1,10 +1,34 @@
 #!/bin/sh
 # A stand-in for the pkg calls sign-catalogue.sh makes in the VM.
-#   pkg repo <dir> signing_command: ...   writes <dir>/meta.conf
-#   pkg info -F <file>                    prints three lines naming the file
+#   pkg repo <dir> signing_command: <cmd...>
+#     speaks pkg's signing_command protocol: for data and packagesite.yaml it
+#     feeds the file's sha256 (hex) to <cmd>, takes the bytes between
+#     "SIGNATURE" and "CERT" as the signature and those between "CERT" and
+#     "END" as the public key, and packs file, .sig and .pub into <name>.pkg
+#     (data.pkg, packagesite.pkg), as pkg repo does
+#   pkg info -F <file>   prints three lines naming the file
 set -eu
 case "$1 $2" in
-"repo "*) echo signed >"$2/meta.conf" ;;
+"repo "*)
+	dir=$2
+	shift 3
+	for pair in data:data packagesite.yaml:packagesite; do
+		file=${pair%%:*} archive=${pair#*:}
+		work=$(mktemp -d)
+		echo "catalogue $file" >"$work/$file"
+		openssl dgst -sha256 -r "$work/$file" | cut -d' ' -f1 | "$@" >"$work/reply"
+		W="$work" perl -0777 -ne '
+			/\ASIGNATURE\n(.*)\nCERT\n(.*)END\n?\z/s or die "stub pkg: malformed signing reply\n";
+			open(my $s, ">", "$ENV{W}/sig") or die; print $s $1;
+			open(my $p, ">", "$ENV{W}/pub") or die; print $p $2;
+		' "$work/reply"
+		mv "$work/sig" "$work/$file.sig"
+		mv "$work/pub" "$work/$file.pub"
+		tar -cf "$dir/$archive.pkg" -C "$work" "$file.sig" "$file.pub" "$file"
+		rm -rf "$work"
+	done
+	echo 'version = 2;' >"$dir/meta.conf"
+	;;
 "info -F") printf 'Name : %s\nVersion : x\nOrigin : y\n' "$(basename "$3" .pkg)" ;;
 *)
 	echo "stub pkg: unsupported: $*" >&2

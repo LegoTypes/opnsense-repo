@@ -122,14 +122,19 @@ printf 'sha256: %s\nsha256: %s\n' "$(sum "$STUB/assets/os-vendor-1.0/os-vendor-1
 expect_fail "notes with two sha256 lines" cf os-alpha "$T/cat7"
 
 # --- build-package.sh and sign-catalogue.sh (VM scripts, stub git/make/pkg) --
-# vmdir: a fresh workspace like the VM's, with scripts/, $T/packages.conf and a key
+# a throwaway signing key (the stub pkg signs with the real openssl), and a second
+# one the published public key does not match
+openssl genrsa -out "$T/key.pem" 2048 2>/dev/null
+openssl rsa -in "$T/key.pem" -pubout -out "$T/pub.pem" 2>/dev/null
+openssl genrsa -out "$T/other.pem" 2048 2>/dev/null
+# vmdir: a fresh workspace like the VM's, with scripts/, $T/packages.conf and the public key
 vmdir() {
 	W="$T/vm"
 	rm -rf "$W"
 	mkdir -p "$W/keys" "$W/vendor/v"
 	cp -R "$root/scripts" "$W/"
 	cp "$T/packages.conf" "$W/packages.conf"
-	echo "public key" >"$W/keys/legotypes-pkg-signing.pub"
+	cp "$T/pub.pem" "$W/keys/legotypes-pkg-signing.pub"
 }
 vm() { (cd "$W" && PATH="$root/tests/stub-vm:$PATH" sh "scripts/$1" "${@:2}"); }
 # vmenv VAR=value... -- <script> <args>: vm with those variables exported
@@ -173,15 +178,17 @@ signdir() {
 	mkdir -p "$W/out" "$W/$R/All" "$W/.signing"
 	echo "built" >"$W/out/os-legotypes-1.0_2.pkg"
 	echo "Built from here." >"$W/out/source"
-	echo "secret" >"$W/.signing/key"
+	cp "$T/key.pem" "$W/.signing/key"
 	local f
 	for f in "$@"; do echo "carried" >"$W/$R/All/$f"; done
 }
 signdir os-alpha-1.1.pkg
 vm sign-catalogue.sh >/dev/null
-expect_eq "sign: catalogue signed" "$(cat "$W/$R/meta.conf")" "signed"
+expect_eq "sign: catalogue written" "$(cat "$W/$R/meta.conf")" "version = 2;"
+tar -xf "$W/$R/data.pkg" -C "$T" data.sig
+expect_eq "sign: signature not empty" "$([[ -s $T/data.sig ]] && echo yes)" "yes"
 expect_eq "sign: bootstrap package" "$(cat "$W/site/os-legotypes.pkg")" "built"
-expect_eq "sign: public key published" "$(cat "$W/site/legotypes-pkg-signing.pub")" "public key"
+expect_eq "sign: public key published" "$(cat "$W/site/legotypes-pkg-signing.pub")" "$(cat "$T/pub.pem")"
 expect_eq "sign: packages.txt names both" "$(grep '^Name' "$W/site/packages.txt" | tr '\n' ' ')" \
 	"Name : os-alpha-1.1 Name : os-legotypes-1.0_2 "
 expect_eq "sign: key removed" "$(names "$W/.signing")" "* "
@@ -195,6 +202,14 @@ expect_fail "sign: two versions of one package" vm sign-catalogue.sh
 signdir os-alpha-1.1.pkg
 rm "$W/.signing/key"
 expect_fail "sign: no key" vm sign-catalogue.sh
+signdir os-alpha-1.1.pkg
+echo >"$W/.signing/key"
+expect_fail "sign: an empty key (the secret did not arrive)" vm sign-catalogue.sh
+expect_eq "sign: nothing published after a failed signing" "$([[ -e $W/site/os-legotypes.pkg ]] && echo yes || echo no)" "no"
+signdir os-alpha-1.1.pkg
+cp "$T/other.pem" "$W/.signing/key"
+expect_fail "sign: a key the published public key does not match" vm sign-catalogue.sh
+expect_eq "sign: key removed after a mismatch" "$(names "$W/.signing")" "* "
 
 echo "passed $pass, failed $failed"
 [[ $failed -eq 0 ]]

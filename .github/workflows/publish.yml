@@ -30,6 +30,11 @@ jobs:
     with:
       package: ${{ inputs.package }}
       catalogue: true
+    # A called workflow sees only the secrets its caller passes, even for the
+    # environment its job names: without this PKG_SIGNING_KEY arrives empty
+    # (publish run 36602098610 deployed a catalogue with empty signatures).
+    # The repository and organization hold no other secrets.
+    secrets: inherit
 
   deploy:
     needs: build

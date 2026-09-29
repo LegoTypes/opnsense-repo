@@ -73,6 +73,10 @@ jobs:
         env:
           PKG_SIGNING_KEY: ${{ secrets.PKG_SIGNING_KEY }}
         run: |
+          if [ -z "$PKG_SIGNING_KEY" ]; then
+            echo "::error::PKG_SIGNING_KEY is empty: the caller must pass secrets: inherit"
+            exit 1
+          fi
           umask 077
           mkdir -p .signing
           printf '%s\n' "$PKG_SIGNING_KEY" > .signing/key
