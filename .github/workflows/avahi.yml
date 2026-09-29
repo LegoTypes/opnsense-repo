@@ -3,7 +3,9 @@ name: avahi
 # Build os-avahi-reflector as a release only. It is being retired in favour of
 # net/netflector and is not in the LegoTypes catalogue, so no firewall is
 # offered it; a release is installed by hand ("pkg add" of the release asset,
-# after checking the sha256 in its notes).
+# after checking the sha256 in its notes). Version 1.0 exists only in the old
+# all-package release publish-9: bump the branch to 1.0_1 (PLUGIN_WWW moves off
+# the retired page) before the first run, or this builds a second, different 1.0.
 on: workflow_dispatch
 
 permissions: {}
