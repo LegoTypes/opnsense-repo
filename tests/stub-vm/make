@@ -1,0 +1,12 @@
+#!/bin/sh
+# A stand-in for "make -C <dir> package ...": writes the files named in
+# $STUB_PKGS (space-separated) into <dir>/work/pkg/.
+set -eu
+[ "$1" = -C ] && [ "$3" = package ] || {
+	echo "stub make: unsupported: $*" >&2
+	exit 2
+}
+mkdir -p "$2/work/pkg"
+for f in $STUB_PKGS; do
+	echo "package $f" >"$2/work/pkg/$f"
+done
