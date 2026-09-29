@@ -63,6 +63,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          # what firewalls are served now, checked against the releases
+          LIVE_PACKAGES_TXT: https://legotypes.github.io/opnsense-repo/packages.txt
         run: bash scripts/carry-forward.sh "$PACKAGE" "site/FreeBSD:15:amd64/26.7/latest/All"
 
       # The signing key goes into the workspace (synced into the VM), never

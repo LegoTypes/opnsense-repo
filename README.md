@@ -21,6 +21,8 @@ The plugins, what they do and how to install them: <https://legotypes.github.io>
 4. `publish` builds the package in FreeBSD 15, adds the other catalogue packages from their releases (each checked against the sha256 in its release notes), signs the catalogue, deploys it to Pages and, only then, records the build as the release `<package>-<version>`. `avahi` builds and records the release only.
 5. Firewalls update from System > Firmware > Plugins, or with `pkg upgrade`.
 
+**If a run fails after its deploy** (the catalogue went live but the `release` job did not create the release): use **Re-run failed jobs** on that run; its artifact still holds the deployed build. Never start a new publish for it: that would rebuild from the branch head under the same version. Until the release exists, every publish fails at carry-forward, which checks that the live catalogue serves exactly each package's newest release, so nothing is silently rolled back.
+
 A bad release is replaced by publishing a newer version: pkg never downgrades. Releases `publish-N` are the builds from before per-package publishing (all packages at once) and are kept as history.
 
 The workflows run the scripts in [`scripts/`](scripts); `bash tests/run.sh` tests them with stand-ins for `gh`, `git`, `make` and `pkg`.

@@ -66,6 +66,12 @@ publish() {
 	mv "$STUB/r" "$STUB/releases.json"
 }
 rel() { bash "$root/scripts/release.sh" "$@"; }
+# live <name-version>...: the packages.txt the live catalogue serves
+live() {
+	local nv
+	for nv in "$@"; do printf 'Name           : %s\nVersion        : %s\nOrigin         : opnsense/%s\n\n' "${nv%-*}" "${nv##*-}" "${nv%-*}"; done >"$T/live.txt"
+}
+export LIVE_PACKAGES_TXT="file://$T/live.txt"
 names() { (cd "$1" && printf '%s ' *); }
 cf() { PACKAGES_CONF="$T/packages.conf" bash "$root/scripts/carry-forward.sh" "$@"; }
 
@@ -101,6 +107,7 @@ publish os-alpha-1.1 2026-01-03T00:00:00Z
 publish os-alpha-extra-2.0 2026-01-04T00:00:00Z
 publish os-beta-9.0 2026-01-05T00:00:00Z
 publish os-vendor-1.0_1 2026-01-02T00:00:00Z
+live os-alpha-1.1 os-alpha-extra-2.0 os-vendor-1.0_1
 cf os-vendor "$T/cat1" >/dev/null
 expect_eq "carries the newest of each other catalogue package, never a release-only one" \
 	"$(names "$T/cat1")" "os-alpha-1.1.pkg os-alpha-extra-2.0.pkg "
@@ -109,13 +116,34 @@ cf os-alpha "$T/cat2" >/dev/null
 expect_eq "a name prefix does not capture another package's releases" \
 	"$(names "$T/cat2")" "os-alpha-extra-2.0.pkg os-vendor-1.0_1.pkg "
 expect_fail "built package not in the catalogue" cf os-beta "$T/cat3"
+live os-alpha-1.2 os-alpha-extra-2.0 os-vendor-1.0_1
+expect_fail "live serves a build that has no release (a publish whose release job failed)" cf os-vendor "$T/cat8"
+expect_fail "the same, for the package being built" cf os-alpha "$T/cat9"
+live os-alpha-1.1 os-vendor-1.0_1
+expect_fail "live lacks a catalogue package that has a release" cf os-vendor "$T/cat10"
+rm "$T/live.txt"
+expect_fail "live catalogue unreadable" cf os-vendor "$T/cat11"
 publish os-vendor-1.0_2 2026-01-06T00:00:00Z "$(printf '0%.0s' {1..64})"
+live os-alpha-1.1 os-alpha-extra-2.0 os-vendor-1.0_2
 expect_fail "sha256 mismatch" cf os-alpha "$T/cat4"
 reset_stub
 publish os-alpha-1.0 2026-01-01T00:00:00Z
+live os-alpha-1.0
 expect_fail "missing release" cf os-alpha "$T/cat5"
+reset_stub
 publish os-alpha-extra-2.0 2026-01-02T00:00:00Z
 publish os-vendor-1.0 2026-01-02T00:00:00Z
+live os-alpha-extra-2.0 os-vendor-1.0
+cf os-alpha "$T/cat12" >/dev/null
+expect_eq "a new package, not yet live or released, can be published" "$(names "$T/cat12")" "os-alpha-extra-2.0.pkg os-vendor-1.0.pkg "
+reset_stub
+publish os-alpha-1.0 2026-01-01T00:00:00Z
+publish os-alpha-extra-2.0 2026-01-02T00:00:00Z
+publish os-vendor-1.0 2026-01-02T00:00:00Z
+live os-alpha-1.0 os-alpha-extra-2.0 os-vendor-1.0
+cf os-alpha "$T/cat13" >/dev/null
+expect_eq "consistent live catalogue and releases carry forward" "$(names "$T/cat13")" "os-alpha-extra-2.0.pkg os-vendor-1.0.pkg "
+rm -r "$T/cat13"
 printf 'no checksum here\n' >"$STUB/notes/os-vendor-1.0"
 expect_fail "notes without sha256" cf os-alpha "$T/cat6"
 printf 'sha256: %s\nsha256: %s\n' "$(sum "$STUB/assets/os-vendor-1.0/os-vendor-1.0.pkg")" "$(sum "$STUB/assets/os-vendor-1.0/os-vendor-1.0.pkg")" >"$STUB/notes/os-vendor-1.0"
@@ -135,6 +163,13 @@ vmdir() {
 	cp -R "$root/scripts" "$W/"
 	cp "$T/packages.conf" "$W/packages.conf"
 	cp "$T/pub.pem" "$W/keys/legotypes-pkg-signing.pub"
+	trust "$T/pub.pem"
+}
+# trust <pem>: the fingerprint os-legotypes ships, as clients will check it
+trust() {
+	mkdir -p "$W/vendor/legotypes/src/etc/pkg/fingerprints/LegoTypes/trusted"
+	printf 'function: "sha256"\nfingerprint: "%s"\n' "$(sum "$1")" \
+		>"$W/vendor/legotypes/src/etc/pkg/fingerprints/LegoTypes/trusted/test.1"
 }
 vm() { (cd "$W" && PATH="$root/tests/stub-vm:$PATH" sh "scripts/$1" "${@:2}"); }
 # vmenv VAR=value... -- <script> <args>: vm with those variables exported
@@ -210,6 +245,11 @@ signdir os-alpha-1.1.pkg
 cp "$T/other.pem" "$W/.signing/key"
 expect_fail "sign: a key the published public key does not match" vm sign-catalogue.sh
 expect_eq "sign: key removed after a mismatch" "$(names "$W/.signing")" "* "
+signdir os-alpha-1.1.pkg
+openssl rsa -in "$T/other.pem" -pubout -out "$T/other.pub" 2>/dev/null
+trust "$T/other.pub"
+expect_fail "sign: a key os-legotypes does not trust (a half-done rotation)" vm sign-catalogue.sh
+expect_eq "sign: nothing published for an untrusted key" "$([[ -e $W/site/os-legotypes.pkg ]] && echo yes || echo no)" "no"
 
 echo "passed $pass, failed $failed"
 [[ $failed -eq 0 ]]

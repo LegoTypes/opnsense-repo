@@ -8,6 +8,7 @@ set -eu
 
 R="site/FreeBSD:15:amd64/26.7/latest"
 PUB=keys/legotypes-pkg-signing.pub
+TRUSTED=vendor/legotypes/src/etc/pkg/fingerprints/LegoTypes/trusted
 
 die() {
 	echo "sign-catalogue.sh: $*" >&2
@@ -47,9 +48,14 @@ printf '%s\n' '#!/bin/sh' 'set -e' 'read -t 2 sum' '[ -n "$sum" ]' \
 pkg repo "$R" signing_command: /bin/sh .signing/sign.sh
 rm -f .signing/key .signing/sign.sh .signing/sig
 
-# check what clients will check: each catalogue file's signature, over its
-# sha256, verifies with the published key, and the key stored beside it is
-# that key
+# check what clients will check: the key stored beside each catalogue file is
+# the published key, its sha256 is a fingerprint os-legotypes trusts (a key and
+# a fingerprint left out of step by a half-done rotation would deploy a
+# catalogue every client refuses), and the signature over the file's sha256
+# verifies with it
+fingerprint=$(openssl dgst -sha256 -r "$PUB" | cut -d' ' -f1)
+cat "$TRUSTED"/* 2>/dev/null | grep -qx "fingerprint: \"$fingerprint\"" ||
+	die "$PUB (sha256 $fingerprint) is not a fingerprint in $TRUSTED"
 for pair in data:data packagesite.yaml:packagesite; do
 	file=${pair%%:*} archive=${pair#*:}
 	v=$(mktemp -d)
