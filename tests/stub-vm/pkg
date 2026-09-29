@@ -1,0 +1,13 @@
+#!/bin/sh
+# A stand-in for the pkg calls sign-catalogue.sh makes in the VM.
+#   pkg repo <dir> signing_command: ...   writes <dir>/meta.conf
+#   pkg info -F <file>                    prints three lines naming the file
+set -eu
+case "$1 $2" in
+"repo "*) echo signed >"$2/meta.conf" ;;
+"info -F") printf 'Name : %s\nVersion : x\nOrigin : y\n' "$(basename "$3" .pkg)" ;;
+*)
+	echo "stub pkg: unsupported: $*" >&2
+	exit 2
+	;;
+esac

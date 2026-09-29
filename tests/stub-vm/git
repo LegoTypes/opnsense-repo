@@ -1,0 +1,22 @@
+#!/bin/sh
+# A stand-in for the git calls build-package.sh makes in the VM.
+#   git clone --quiet --depth 1 --branch <branch> <url> <dir>   records "<url> <branch>" in <dir>/.cloned
+#   git -C <dir> rev-parse [--short] HEAD                          prints a fixed commit
+set -eu
+case $1 in
+clone)
+	shift
+	branch=''
+	while [ $# -gt 2 ]; do
+		[ "$1" = --branch ] && branch=$2
+		shift
+	done
+	mkdir -p "$2"
+	echo "$1 $branch" >"$2/.cloned"
+	;;
+-C) echo 0123456789abcdef0123456789abcdef01234567 ;;
+*)
+	echo "stub git: unsupported: $*" >&2
+	exit 2
+	;;
+esac

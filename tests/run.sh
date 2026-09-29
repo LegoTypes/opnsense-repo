@@ -121,5 +121,80 @@ expect_fail "notes without sha256" cf os-alpha "$T/cat6"
 printf 'sha256: %s\nsha256: %s\n' "$(sum "$STUB/assets/os-vendor-1.0/os-vendor-1.0.pkg")" "$(sum "$STUB/assets/os-vendor-1.0/os-vendor-1.0.pkg")" >"$STUB/notes/os-vendor-1.0"
 expect_fail "notes with two sha256 lines" cf os-alpha "$T/cat7"
 
+# --- build-package.sh and sign-catalogue.sh (VM scripts, stub git/make/pkg) --
+# vmdir: a fresh workspace like the VM's, with scripts/, $T/packages.conf and a key
+vmdir() {
+	W="$T/vm"
+	rm -rf "$W"
+	mkdir -p "$W/keys" "$W/vendor/v"
+	cp -R "$root/scripts" "$W/"
+	cp "$T/packages.conf" "$W/packages.conf"
+	echo "public key" >"$W/keys/legotypes-pkg-signing.pub"
+}
+vm() { (cd "$W" && PATH="$root/tests/stub-vm:$PATH" sh "scripts/$1" "${@:2}"); }
+# vmenv VAR=value... -- <script> <args>: vm with those variables exported
+vmenv() {
+	local a=()
+	while [[ $1 != -- ]]; do
+		a+=("$1")
+		shift
+	done
+	shift
+	(
+		export "${a[@]}"
+		vm "$@"
+	)
+}
+commit=0123456789abcdef0123456789abcdef01234567
+
+conf 'os-alpha   Org/plugins br-alpha net/alpha yes' \
+	'os-vendor  .           main     vendor/v  yes'
+vmdir
+vmenv STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha >/dev/null
+expect_eq "build: one package in out/" "$(names "$W/out")" "os-alpha-1.1.pkg source "
+expect_eq "build: source line" "$(cat "$W/out/source")" "Built from Org/plugins, branch br-alpha, commit $commit."
+expect_fail "build: a -devel package" vmenv STUB_PKGS=os-alpha-devel-1.1.pkg -- build-package.sh os-alpha
+expect_fail "build: two packages" vmenv "STUB_PKGS=os-alpha-1.1.pkg os-alpha-1.0.pkg" -- build-package.sh os-alpha
+expect_fail "build: no package" vmenv STUB_PKGS= -- build-package.sh os-alpha
+expect_fail "build: not in packages.conf" vmenv STUB_PKGS=os-gamma-1.0.pkg -- build-package.sh os-gamma
+vmenv STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface -- build-package.sh os-vendor >/dev/null
+expect_eq "build: this repository's package" "$(cat "$W/out/source")" \
+	"Built from Org/repo, vendor/v, commit feedface, in LegoTypes/plugins master $commit."
+expect_fail "build: this repository's package without GITHUB_SHA" \
+	vmenv STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo -- build-package.sh os-vendor
+
+conf 'os-alpha      Org/plugins br   net/alpha        yes' \
+	'os-beta       Org/plugins br   net/beta         no' \
+	'os-legotypes  .           main vendor/legotypes yes'
+R="site/FreeBSD:15:amd64/26.7/latest"
+# signdir <carried file...>: out/ holds the built os-legotypes, All/ the carried files
+signdir() {
+	vmdir
+	mkdir -p "$W/out" "$W/$R/All" "$W/.signing"
+	echo "built" >"$W/out/os-legotypes-1.0_2.pkg"
+	echo "Built from here." >"$W/out/source"
+	echo "secret" >"$W/.signing/key"
+	local f
+	for f in "$@"; do echo "carried" >"$W/$R/All/$f"; done
+}
+signdir os-alpha-1.1.pkg
+vm sign-catalogue.sh >/dev/null
+expect_eq "sign: catalogue signed" "$(cat "$W/$R/meta.conf")" "signed"
+expect_eq "sign: bootstrap package" "$(cat "$W/site/os-legotypes.pkg")" "built"
+expect_eq "sign: public key published" "$(cat "$W/site/legotypes-pkg-signing.pub")" "public key"
+expect_eq "sign: packages.txt names both" "$(grep '^Name' "$W/site/packages.txt" | tr '\n' ' ')" \
+	"Name : os-alpha-1.1 Name : os-legotypes-1.0_2 "
+expect_eq "sign: key removed" "$(names "$W/.signing")" "* "
+signdir os-alpha-1.1.pkg os-beta-9.0.pkg
+expect_fail "sign: a release-only package in the catalogue" vm sign-catalogue.sh
+expect_eq "sign: key removed after a failure" "$(names "$W/.signing")" "* "
+signdir
+expect_fail "sign: a catalogue package missing" vm sign-catalogue.sh
+signdir os-alpha-1.1.pkg os-alpha-1.0.pkg
+expect_fail "sign: two versions of one package" vm sign-catalogue.sh
+signdir os-alpha-1.1.pkg
+rm "$W/.signing/key"
+expect_fail "sign: no key" vm sign-catalogue.sh
+
 echo "passed $pass, failed $failed"
 [[ $failed -eq 0 ]]
