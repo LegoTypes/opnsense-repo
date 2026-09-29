@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# A stand-in for the gh calls scripts/ make. State lives in $STUB:
+#   releases.json        gh release list output
+#   notes/<tag>          release bodies (gh release view <tag> --json body --jq .body)
+#   assets/<tag>/<file>  release assets
+#   tags                 existing git tags, one per line
+#   fail_api             present: gh api fails
+#   created              gh release create appends "<tag>|<file>|<target>" and the notes
+set -euo pipefail
+case "$1 $2" in
+"release list") cat "$STUB/releases.json" ;;
+"release view")
+	[[ -f $STUB/notes/$3 ]] || {
+		echo "release not found" >&2
+		exit 1
+	}
+	cat "$STUB/notes/$3"
+	;;
+"release download")
+	tag=$3 pat='' dir=''
+	shift 3
+	while [[ $# -gt 0 ]]; do
+		case $1 in
+		--pattern) pat=$2 && shift 2 ;;
+		--dir) dir=$2 && shift 2 ;;
+		*) shift ;;
+		esac
+	done
+	[[ -f $STUB/assets/$tag/$pat ]] || {
+		echo "no asset $pat" >&2
+		exit 1
+	}
+	cp "$STUB/assets/$tag/$pat" "$dir/"
+	;;
+"release create")
+	tag=$3 file=$4 target=none notes=''
+	shift 4
+	while [[ $# -gt 0 ]]; do
+		case $1 in
+		--notes) notes=$2 && shift 2 ;;
+		--target) target=$2 && shift 2 ;;
+		*) shift ;;
+		esac
+	done
+	printf '%s|%s|%s\n%s\n' "$tag" "$(basename "$file")" "$target" "$notes" >>"$STUB/created"
+	;;
+"api "*)
+	[[ ! -e $STUB/fail_api ]] || {
+		echo "HTTP 502" >&2
+		exit 1
+	}
+	prefix=${2##*/matching-refs/tags/}
+	awk -v p="$prefix" 'index($0, p) == 1' "$STUB/tags" | jq -R '{ref: ("refs/tags/" + .)}' | jq -s .
+	;;
+*)
+	echo "stub gh: unsupported: $*" >&2
+	exit 2
+	;;
+esac
