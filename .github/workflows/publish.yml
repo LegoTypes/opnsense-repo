@@ -1,13 +1,22 @@
 name: publish
 
-# Build the LegoTypes OPNsense packages in a FreeBSD 15 VM, sign the catalog,
-# publish the repository on GitHub Pages and keep the packages as a release.
-on: workflow_dispatch
+# Publish one catalogue package: build it, carry the other catalogue packages
+# forward from their releases unchanged, sign the catalogue and deploy it to
+# GitHub Pages, then record the build as release <name>-<version>. Nothing else
+# is rebuilt, so work on another plugin's branch never ships with this one.
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to publish
+        type: choice
+        required: true
+        options:
+          - os-wg-client-tunnels
+          - os-mac-alias-cache
+          - os-legotypes
 
-permissions:
-  contents: write
-  pages: write
-  id-token: write
+permissions: {}
 
 concurrency:
   group: publish
@@ -15,88 +24,43 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    # PKG_SIGNING_KEY is a secret of the "release" environment, which runs only
-    # from main and only after the owner approves the run. Every action is pinned
-    # to a commit, and so must every action those actions use (the repository
-    # requires it): the key passes through the VM.
-    environment: release
-    steps:
-      # no token in .git: the workspace is copied into the build VM
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      # The signing key goes into the workspace (synced into the VM), never
-      # into site/, and is removed in the VM right after signing and on the
-      # runner in the step after.
-      - name: Stage the signing key
-        env:
-          PKG_SIGNING_KEY: ${{ secrets.PKG_SIGNING_KEY }}
-        run: |
-          umask 077
-          mkdir -p .signing
-          printf '%s\n' "$PKG_SIGNING_KEY" > .signing/key
-
-      - name: Build and sign in FreeBSD 15
-        uses: vmactions/freebsd-vm@a2f9a41fa97f6848b8c3b791087dfcdaa5b473ff # v1.5.8
-        with:
-          release: "15.0"
-          usesh: true
-          prepare: pkg install -y git
-          run: |
-            set -e
-            umask 022
-            ARGS="PLUGIN_DEVEL= PLUGIN_PHP=85 PLUGIN_PYTHON=313"
-            git clone --depth 1 --branch add-wg-ipv6-gateway https://github.com/LegoTypes/plugins.git p-wg
-            git clone --depth 1 --branch add-avahi-reflector https://github.com/LegoTypes/plugins.git p-avahi
-            git clone --depth 1 --branch add-mac-alias-cache https://github.com/LegoTypes/plugins.git p-mac
-            cp -R vendor/legotypes p-wg/vendor/legotypes
-            make -C p-wg/net/wg-client-tunnels package $ARGS
-            make -C p-avahi/net/avahi-reflector package $ARGS
-            make -C p-mac/net/mac-alias-cache package $ARGS
-            make -C p-wg/vendor/legotypes package $ARGS
-            R="site/FreeBSD:15:amd64/26.7/latest"
-            mkdir -p "$R/All"
-            cp p-wg/net/wg-client-tunnels/work/pkg/*.pkg p-avahi/net/avahi-reflector/work/pkg/*.pkg \
-               p-mac/net/mac-alias-cache/work/pkg/*.pkg p-wg/vendor/legotypes/work/pkg/*.pkg "$R/All/"
-            # signing_command mode (pkg-repo(8)): the repository carries the
-            # signature and the public key, so clients check the key's sha256
-            # against their trusted fingerprints (signature_type "fingerprints")
-            printf '%s\n' '#!/bin/sh' 'read -t 2 sum' '[ -n "$sum" ] || exit 1' 'echo SIGNATURE' \
-              'printf %s "$sum" | /usr/bin/openssl dgst -sign .signing/key -sha256 -binary' 'echo' \
-              'echo CERT' 'cat keys/legotypes-pkg-signing.pub' 'echo END' > .signing/sign.sh
-            pkg repo "$R" signing_command: /bin/sh .signing/sign.sh
-            rm -f .signing/key .signing/sign.sh
-            cp "$R"/All/os-legotypes-*.pkg site/os-legotypes.pkg
-            cp keys/legotypes-pkg-signing.pub site/legotypes-pkg-signing.pub
-            for p in "$R"/All/*.pkg; do pkg info -F "$p" | head -3; echo; done > site/packages.txt
-            cat site/packages.txt
-            ls -l "$R"
-
-      - name: Remove the signing key from the runner
-        if: always()
-        run: rm -rf .signing
-
-      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-        with:
-          path: site
-
-      - name: Keep the packages as a release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "publish-${{ github.run_number }}" \
-            site/FreeBSD:15:amd64/26.7/latest/All/*.pkg \
-            --title "Packages, publish ${{ github.run_number }}" \
-            --notes "OPNsense 26.7 (FreeBSD:15:amd64) packages as published in run ${{ github.run_number }}."
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build.yml
+    with:
+      package: ${{ inputs.package }}
+      catalogue: true
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  # only after the deploy: a failed deploy leaves no release, so the same
+  # version can be published again
+  release:
+    needs: [build, deploy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: package
+          path: out
+      - name: Record the build as release ${{ needs.build.outputs.tag }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash scripts/release.sh create out/*.pkg "$(cat out/source)"

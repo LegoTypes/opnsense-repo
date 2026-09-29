@@ -1,6 +1,6 @@
 PLUGIN_NAME=		legotypes
 PLUGIN_VERSION=		1.0
-PLUGIN_REVISION=	1
+PLUGIN_REVISION=	2
 PLUGIN_COMMENT=		Vendor repository for the LegoTypes OPNsense plugins
 PLUGIN_MAINTAINER=	23534755+cayossarian@users.noreply.github.com
 PLUGIN_WWW=		https://legotypes.github.io/install/
