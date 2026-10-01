@@ -54,15 +54,17 @@ reset_stub() {
 	: >"$STUB/tags"
 	echo '[]' >"$STUB/releases.json"
 }
-# publish <tag> <created-at> [notes-sha]: a release holding <tag>.pkg
+# publish <tag> <published-at> [notes-sha] [created-at]: a release holding <tag>.pkg. As on GitHub,
+# createdAt is the date of the tagged commit (so two releases of one commit share it), publishedAt is
+# when the release was made, and gh lists the newest first.
 publish() {
-	local tag=$1 at=$2 f
+	local tag=$1 at=$2 created=${4:-$2} f
 	mkdir -p "$STUB/assets/$tag"
 	f="$STUB/assets/$tag/$tag.pkg"
 	echo "bytes of $tag" >"$f"
 	printf 'Built from Org/plugins, branch b, commit 0000000.\n\nsha256: %s\n' "${3:-$(sum "$f")}" >"$STUB/notes/$tag"
 	echo "$tag" >>"$STUB/tags"
-	jq --arg t "$tag" --arg c "$at" '. + [{tagName: $t, createdAt: $c}]' "$STUB/releases.json" >"$STUB/r"
+	jq --arg t "$tag" --arg p "$at" --arg c "$created" '[{tagName: $t, createdAt: $c, publishedAt: $p}] + .' "$STUB/releases.json" >"$STUB/r"
 	mv "$STUB/r" "$STUB/releases.json"
 }
 rel() { bash "$root/scripts/release.sh" "$@"; }
@@ -144,6 +146,18 @@ live os-alpha-1.0 os-alpha-extra-2.0 os-vendor-1.0
 cf os-alpha "$T/cat13" >/dev/null
 expect_eq "consistent live catalogue and releases carry forward" "$(names "$T/cat13")" "os-alpha-extra-2.0.pkg os-vendor-1.0.pkg "
 rm -r "$T/cat13"
+reset_stub
+publish os-alpha-1.0 2026-01-01T00:00:00Z "" 2026-01-01T00:00:00Z
+publish os-alpha-1.1 2026-01-02T00:00:00Z "" 2026-01-01T00:00:00Z
+publish os-vendor-1.0 2026-01-02T00:00:00Z
+live os-alpha-1.1 os-vendor-1.0
+cf os-vendor "$T/cat14" >/dev/null
+expect_eq "two releases tagged on one commit: the later published is the newest" "$(names "$T/cat14")" "os-alpha-1.1.pkg "
+reset_stub
+publish os-alpha-1.0 2026-01-01T00:00:00Z
+publish os-alpha-extra-2.0 2026-01-02T00:00:00Z
+publish os-vendor-1.0 2026-01-02T00:00:00Z
+live os-alpha-1.0 os-alpha-extra-2.0 os-vendor-1.0
 printf 'no checksum here\n' >"$STUB/notes/os-vendor-1.0"
 expect_fail "notes without sha256" cf os-alpha "$T/cat6"
 printf 'sha256: %s\nsha256: %s\n' "$(sum "$STUB/assets/os-vendor-1.0/os-vendor-1.0.pkg")" "$(sum "$STUB/assets/os-vendor-1.0/os-vendor-1.0.pkg")" >"$STUB/notes/os-vendor-1.0"
