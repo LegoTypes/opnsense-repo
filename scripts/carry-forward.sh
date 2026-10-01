@@ -21,14 +21,15 @@ built=$1 dir=$2
 
 catalogue=$(sh "$here/packages.sh" catalogue) || die "cannot read the catalogue"
 grep -qxF -- "$built" <<<"$catalogue" || die "$built is not a catalogue package"
-releases=$(gh release list --limit 1000 --json tagName,createdAt) || die "cannot list releases"
+releases=$(gh release list --limit 1000 --json tagName,publishedAt) || die "cannot list releases"
 live=$(curl -fsSL "$LIVE_PACKAGES_TXT") || die "cannot read the live catalogue at $LIVE_PACKAGES_TXT"
 
-# the newest release tag of a package; package names never contain "-<digit>"
+# the newest release tag of a package, by when it was published: createdAt is the date of the tagged
+# commit, which two publishes from one commit share. Package names never contain "-<digit>"
 # (packages.sh), so this matches only that package's own tags
 newest() {
 	jq -r --arg p "$1" \
-		'[.[] | select(.tagName | test("^" + $p + "-[0-9]"))] | sort_by(.createdAt) | last | .tagName // empty' \
+		'[.[] | select(.tagName | test("^" + $p + "-[0-9]"))] | sort_by(.publishedAt) | last | .tagName // empty' \
 		<<<"$releases"
 }
 
