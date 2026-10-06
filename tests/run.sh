@@ -92,14 +92,19 @@ publish() {
 	mv "$STUB/r" "$STUB/releases.json"
 }
 rel() { bash "$root/scripts/release.sh" "$@"; }
-# live <name-version>...: the packages.txt the live catalogue serves
+# live [-s <series>] <name-version>...: the packages.txt the live site serves for a series (default 26.7)
 live() {
-	local nv
-	for nv in "$@"; do printf 'Name           : %s\nVersion        : %s\nOrigin         : opnsense/%s\n\n' "${nv%-*}" "${nv##*-}" "${nv%-*}"; done >"$T/live.txt"
+	local s=26.7 nv d
+	if [[ $1 == -s ]]; then s=$2 && shift 2; fi
+	d="$T/livesite/FreeBSD:15:amd64/$s/latest"
+	mkdir -p "$d"
+	for nv in "$@"; do printf 'Name           : %s\nVersion        : %s\nOrigin         : opnsense/%s\n\n' "${nv%-*}" "${nv##*-}" "${nv%-*}"; done >"$d/packages.txt"
 }
-export LIVE_PACKAGES_TXT="file://$T/live.txt"
+export LIVE_SITE="file://$T/livesite"
 names() { (cd "$1" && printf '%s ' *); }
-cf() { PACKAGES_CONF="$T/packages.conf" bash "$root/scripts/carry-forward.sh" "$@"; }
+# cf <built>: carry-forward in $T/cfw with $T/packages.conf and $T/repo.conf; trees land under $T/cfw/site
+cf() { (rm -rf "$T/cfw" && mkdir -p "$T/cfw" && cd "$T/cfw" && PACKAGES_CONF="$T/packages.conf" REPO_CONF="$T/repo.conf" bash "$root/scripts/carry-forward.sh" "$@"); }
+tree() { echo "$T/cfw/site/FreeBSD:15:amd64/${1:-26.7}/latest/All"; }
 
 reset_stub
 mkdir -p "$T/out"
@@ -129,6 +134,7 @@ expect_fail "create existing" rel create "$T/out/os-alpha-1.0.pkg" "src"
 expect_fail "create empty source" rel create "$T/out/os-alpha-1.1.pkg" ""
 expect_fail "create two-line source" rel create "$T/out/os-alpha-1.1.pkg" $'a\nb'
 
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=26.7'
 conf 'os-alpha        Org/plugins br   net/alpha yes' \
 	'os-alpha-extra  Org/plugins br   net/extra yes' \
 	'os-beta         Org/plugins br   net/beta  no' \
@@ -140,58 +146,74 @@ publish os-alpha-extra-2.0 2026-01-04T00:00:00Z
 publish os-beta-9.0 2026-01-05T00:00:00Z
 publish os-vendor-1.0_1 2026-01-02T00:00:00Z
 live os-alpha-1.1 os-alpha-extra-2.0 os-vendor-1.0_1
-cf os-vendor "$T/cat1" >/dev/null
+cf os-vendor >/dev/null
 expect_eq "carries the newest of each other catalogue package, never a release-only one" \
-	"$(names "$T/cat1")" "os-alpha-1.1.pkg os-alpha-extra-2.0.pkg "
-expect_eq "carries the bytes" "$(cat "$T/cat1/os-alpha-1.1.pkg")" "bytes of os-alpha-1.1"
-cf os-alpha "$T/cat2" >/dev/null
+	"$(names "$(tree)")" "os-alpha-1.1.pkg os-alpha-extra-2.0.pkg "
+expect_eq "carries the bytes" "$(cat "$(tree)/os-alpha-1.1.pkg")" "bytes of os-alpha-1.1"
+cf os-alpha >/dev/null
 expect_eq "a name prefix does not capture another package's releases" \
-	"$(names "$T/cat2")" "os-alpha-extra-2.0.pkg os-vendor-1.0_1.pkg "
-expect_fail "built package not in the catalogue" cf os-beta "$T/cat3"
+	"$(names "$(tree)")" "os-alpha-extra-2.0.pkg os-vendor-1.0_1.pkg "
+expect_fail "built package not in the catalogue" cf os-beta
 live os-alpha-1.2 os-alpha-extra-2.0 os-vendor-1.0_1
-expect_fail "live serves a build that has no release (a publish whose release job failed)" cf os-vendor "$T/cat8"
-expect_fail "the same, for the package being built" cf os-alpha "$T/cat9"
+expect_fail "live serves a build that has no release (a publish whose release job failed)" cf os-vendor
+expect_fail "the same, for the package being built" cf os-alpha
 live os-alpha-1.1 os-vendor-1.0_1
-expect_fail "live lacks a catalogue package that has a release" cf os-vendor "$T/cat10"
-rm "$T/live.txt"
-expect_fail "live catalogue unreadable" cf os-vendor "$T/cat11"
+expect_fail "live lacks a catalogue package that has a release" cf os-vendor
+rm -r "$T/livesite"
+expect_fail "live catalogue unreadable" cf os-vendor
 publish os-vendor-1.0_2 2026-01-06T00:00:00Z "$(printf '0%.0s' {1..64})"
 live os-alpha-1.1 os-alpha-extra-2.0 os-vendor-1.0_2
-expect_fail "sha256 mismatch" cf os-alpha "$T/cat4"
+expect_fail "sha256 mismatch" cf os-alpha
 reset_stub
 publish os-alpha-1.0 2026-01-01T00:00:00Z
 live os-alpha-1.0
-expect_fail "missing release" cf os-alpha "$T/cat5"
+expect_fail "missing release" cf os-alpha
 reset_stub
 publish os-alpha-extra-2.0 2026-01-02T00:00:00Z
 publish os-vendor-1.0 2026-01-02T00:00:00Z
 live os-alpha-extra-2.0 os-vendor-1.0
-cf os-alpha "$T/cat12" >/dev/null
-expect_eq "a new package, not yet live or released, can be published" "$(names "$T/cat12")" "os-alpha-extra-2.0.pkg os-vendor-1.0.pkg "
+cf os-alpha >/dev/null
+expect_eq "a new package, not yet live or released, can be published" "$(names "$(tree)")" "os-alpha-extra-2.0.pkg os-vendor-1.0.pkg "
 reset_stub
 publish os-alpha-1.0 2026-01-01T00:00:00Z
 publish os-alpha-extra-2.0 2026-01-02T00:00:00Z
 publish os-vendor-1.0 2026-01-02T00:00:00Z
 live os-alpha-1.0 os-alpha-extra-2.0 os-vendor-1.0
-cf os-alpha "$T/cat13" >/dev/null
-expect_eq "consistent live catalogue and releases carry forward" "$(names "$T/cat13")" "os-alpha-extra-2.0.pkg os-vendor-1.0.pkg "
-rm -r "$T/cat13"
+cf os-alpha >/dev/null
+expect_eq "consistent live catalogue and releases carry forward" "$(names "$(tree)")" "os-alpha-extra-2.0.pkg os-vendor-1.0.pkg "
 reset_stub
 publish os-alpha-1.0 2026-01-01T00:00:00Z "" 2026-01-01T00:00:00Z
 publish os-alpha-1.1 2026-01-02T00:00:00Z "" 2026-01-01T00:00:00Z
 publish os-vendor-1.0 2026-01-02T00:00:00Z
 live os-alpha-1.1 os-vendor-1.0
-cf os-vendor "$T/cat14" >/dev/null
-expect_eq "two releases tagged on one commit: the later published is the newest" "$(names "$T/cat14")" "os-alpha-1.1.pkg "
+cf os-vendor >/dev/null
+expect_eq "two releases tagged on one commit: the later published is the newest" "$(names "$(tree)")" "os-alpha-1.1.pkg "
 reset_stub
 publish os-alpha-1.0 2026-01-01T00:00:00Z
 publish os-alpha-extra-2.0 2026-01-02T00:00:00Z
 publish os-vendor-1.0 2026-01-02T00:00:00Z
 live os-alpha-1.0 os-alpha-extra-2.0 os-vendor-1.0
 printf 'no checksum here\n' >"$STUB/notes/os-vendor-1.0"
-expect_fail "notes without sha256" cf os-alpha "$T/cat6"
+expect_fail "notes without sha256" cf os-alpha
 printf 'sha256: %s\nsha256: %s\n' "$(sum "$STUB/assets/os-vendor-1.0/os-vendor-1.0.pkg")" "$(sum "$STUB/assets/os-vendor-1.0/os-vendor-1.0.pkg")" >"$STUB/notes/os-vendor-1.0"
-expect_fail "notes with two sha256 lines" cf os-alpha "$T/cat7"
+expect_fail "notes with two sha256 lines" cf os-alpha
+
+# two served series: 27.1 is the target, 26.7 stays frozen at its last releases
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=27.1' 'SERVE=26.7 27.1'
+reset_stub
+rm -rf "$T/livesite"
+publish os-alpha-1.1 2026-01-03T00:00:00Z
+publish os-vendor-1.0 2026-01-02T00:00:00Z
+publish os-alpha-1.1_1 2026-02-01T00:00:00Z
+printf 'Built.\n\nseries: 27.1\n\nsha256: %s\n' "$(sum "$STUB/assets/os-alpha-1.1_1/os-alpha-1.1_1.pkg")" >"$STUB/notes/os-alpha-1.1_1"
+live -s 26.7 os-alpha-1.1 os-vendor-1.0
+live -s 27.1 os-alpha-1.1_1
+cf os-vendor >/dev/null
+expect_eq "series: the target tree carries the 27.1 builds" "$(names "$(tree 27.1)")" "os-alpha-1.1_1.pkg "
+expect_eq "series: the frozen tree carries its own releases, the built package's included" "$(names "$(tree 26.7)")" "os-alpha-1.1.pkg os-vendor-1.0.pkg "
+live -s 26.7 os-alpha-1.0 os-vendor-1.0
+expect_fail "series: a frozen tree serving other than its newest releases" cf os-vendor
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=26.7'
 
 # --- newest-release.sh ----------------------------------------------------------
 nr() { bash "$root/scripts/newest-release.sh" "$@"; }
@@ -323,6 +345,15 @@ openssl rsa -in "$T/other.pem" -pubout -out "$T/other.pub" 2>/dev/null
 trust "$T/other.pub"
 expect_fail "sign: a key os-legotypes does not trust (a half-done rotation)" vm sign-catalogue.sh
 expect_eq "sign: nothing published for an untrusted key" "$([[ -e $W/site/os-legotypes.pkg ]] && echo yes || echo no)" "no"
+signdir os-alpha-1.1.pkg
+printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=26.1 26.7\n' >"$W/repo.conf"
+mkdir -p "$W/site/FreeBSD:15:amd64/26.1/latest/All"
+echo "old" >"$W/site/FreeBSD:15:amd64/26.1/latest/All/os-alpha-1.0.pkg"
+vm sign-catalogue.sh >/dev/null
+expect_eq "sign: a frozen tree is signed too" "$(cat "$W/site/FreeBSD:15:amd64/26.1/latest/meta.conf" 2>/dev/null)" "version = 2;"
+expect_eq "sign: a frozen tree may lack a package" "$(grep -c '^Name' "$W/site/FreeBSD:15:amd64/26.1/latest/packages.txt" 2>/dev/null)" "1"
+expect_eq "sign: the root keeps the target tree" "$(grep '^Name' "$W/site/packages.txt" | tr '\n' ' ')" \
+	"Name : os-alpha-1.1 Name : os-legotypes-1.0_2 "
 
 # --- upstream.sh (stub curl serves a fake mirror) -----------------------------
 # mirror <series...>: a fake OPNsense mirror with those series under FreeBSD:15:amd64; the root

@@ -63,9 +63,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          # what firewalls are served now, checked against the releases
-          LIVE_PACKAGES_TXT: https://legotypes.github.io/opnsense-repo/packages.txt
-        run: bash scripts/carry-forward.sh "$PACKAGE" "$(sh scripts/repo.sh tree)/All"
+          # what firewalls are served now (each served tree's packages.txt), checked against the releases
+          LIVE_SITE: https://legotypes.github.io/opnsense-repo
+        run: bash scripts/carry-forward.sh "$PACKAGE"
 
       # The signing key goes into the workspace (synced into the VM), never
       # into site/, and is removed in the VM right after signing and on the
