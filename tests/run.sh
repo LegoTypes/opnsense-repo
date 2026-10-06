@@ -383,18 +383,26 @@ expect_fail "mirror unreachable" up
 unset STUB_MIRROR STUB_MIRROR_URL UPSTREAM_MIRROR
 
 # --- compare-package.sh -------------------------------------------------------
-mkpkg() { # mkpkg <file> <+MANIFEST json>: a package holding only its manifest, as compare reads it
-	local d
+mkpkg() { # mkpkg <file> <+MANIFEST json> [<path> <content>]...: a package with its manifest and those files
+	local d out=$1 m=$2
+	shift 2
 	d=$(mktemp -d)
-	printf '%s' "$2" >"$d/+MANIFEST"
-	tar -cf "$1" -C "$d" +MANIFEST
+	printf '%s' "$m" >"$d/+MANIFEST"
+	local names=(+MANIFEST)
+	while [[ $# -ge 2 ]]; do
+		mkdir -p "$d/$(dirname "${1#/}")"
+		printf '%s' "$2" >"$d/${1#/}"
+		names+=("${1#/}")
+		shift 2
+	done
+	tar -cf "$out" -C "$d" "${names[@]}"
 	rm -rf "$d"
 }
 base='{"name":"os-alpha","abi":"FreeBSD:15:amd64","arch":"freebsd:15:x86:64","flatsize":10,
  "annotations":{"product_abi":"26.7","FreeBSD_version":"1500068","product_hash":"aaaaaaa"},
  "scripts":{"post-install":"echo hi"},
  "files":{"/usr/local/a":{"sum":"1$x","perm":"0644","mtime":1},"/usr/local/b":{"sum":"1$y","perm":"0755","mtime":1}}}'
-mod() { jq -c "$1" <<<"$base"; }
+mod() { jq -c "$@" <<<"$base"; }
 cmpk() { bash "$root/scripts/compare-package.sh" "$T/a.pkg" "$T/b.pkg"; echo "rc=$?"; }
 mkpkg "$T/a.pkg" "$base"
 mkpkg "$T/b.pkg" "$(mod '.annotations.product_hash = "bbbbbbb" | .annotations.FreeBSD_version = "1501000" | .flatsize = 99 | .files["/usr/local/a"].mtime = 9')"
@@ -409,6 +417,13 @@ mkpkg "$T/b.pkg" "$(mod '.scripts["post-install"] = "echo bye" | .scripts["pre-d
 expect_eq "compare: scripts" "$(cmpk)" $'script post-install: changed\nscript pre-deinstall: added\nrc=1'
 mkpkg "$T/b.pkg" "$(mod '.files["/usr/local/a"].perm = "0755" | .files["/usr/local/b"].sum = "1$z" | .files["/usr/local/c"] = {"sum":"1$c","perm":"0644"}')"
 expect_eq "compare: files" "$(cmpk)" $'file /usr/local/a: mode 0644 -> 0755\nfile /usr/local/b: content changed\nfile /usr/local/c: added\nrc=1'
+vf='/usr/local/opnsense/version/alpha'
+vj() { printf '{"product_hash": "%s", "product_version": "%s"}' "$1" "$2"; }
+mkpkg "$T/a.pkg" "$(mod --arg f "$vf" '.files[$f] = {"sum":"1$v1","perm":"0644"}')" "$vf" "$(vj aaaaaaa 1.0)"
+mkpkg "$T/b.pkg" "$(mod --arg f "$vf" '.files[$f] = {"sum":"1$v2","perm":"0644"}')" "$vf" "$(vj bbbbbbb 1.0)"
+expect_eq "compare: a version file differing only in its commit hash is not material" "$(cmpk)" "rc=0"
+mkpkg "$T/b.pkg" "$(mod --arg f "$vf" '.files[$f] = {"sum":"1$v3","perm":"0644"}')" "$vf" "$(vj bbbbbbb 1.1)"
+expect_eq "compare: a version file differing otherwise is" "$(cmpk)" $'file /usr/local/opnsense/version/alpha: content changed\nrc=1'
 expect_eq "compare: not a package" "$(bash "$root/scripts/compare-package.sh" "$T/repo.conf" "$T/a.pkg" 2>/dev/null; echo "rc=$?")" "rc=2"
 
 # --- canary-findings.sh and canary-report.sh ----------------------------------------
