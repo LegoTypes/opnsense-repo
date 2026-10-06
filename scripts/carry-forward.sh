@@ -24,22 +24,13 @@ grep -qxF -- "$built" <<<"$catalogue" || die "$built is not a catalogue package"
 releases=$(gh release list --limit 1000 --json tagName,publishedAt) || die "cannot list releases"
 live=$(curl -fsSL "$LIVE_PACKAGES_TXT") || die "cannot read the live catalogue at $LIVE_PACKAGES_TXT"
 
-# the newest release tag of a package, by when it was published: createdAt is the date of the tagged
-# commit, which two publishes from one commit share. Package names never contain "-<digit>"
-# (packages.sh), so this matches only that package's own tags
-newest() {
-	jq -r --arg p "$1" \
-		'[.[] | select(.tagName | test("^" + $p + "-[0-9]"))] | sort_by(.publishedAt) | last | .tagName // empty' \
-		<<<"$releases"
-}
-
 # Before anything is carried, the live catalogue must serve exactly each
 # package's newest release. It does not when a publish deployed a build and its
 # release job then failed: carrying the previous release would silently roll
 # that package back. Recover by re-running that publish's failed jobs (its
 # artifact still holds the deployed build), never by publishing again.
 while read -r pkg <&3; do
-	tag=$(newest "$pkg")
+	tag=$(RELEASES_JSON="$releases" bash "$here/newest-release.sh" "$pkg")
 	served=$(awk -v p="$pkg" '$1 == "Name" && $3 == p { getline; if ($1 == "Version") print $3 }' <<<"$live")
 	[[ -n $tag || -n $served ]] || continue # new: neither released nor live yet
 	[[ -n $tag && $served == "${tag#"$pkg"-}" ]] ||
@@ -49,7 +40,7 @@ done 3<<<"$catalogue"
 mkdir -p "$dir"
 while read -r pkg <&3; do
 	[[ $pkg != "$built" ]] || continue
-	tag=$(newest "$pkg")
+	tag=$(RELEASES_JSON="$releases" bash "$here/newest-release.sh" "$pkg")
 	[[ -n $tag ]] || die "$pkg has no release to carry forward"
 	want=$(gh release view "$tag" --json body --jq .body | tr -d '\r' |
 		sed -n 's/^sha256: \([0-9a-f]\{64\}\)$/\1/p')
