@@ -78,9 +78,10 @@ The canary never publishes. A finding is acted on by a person:
 
 When the canary's series issue opens (or `configctl legotypes check` reports a series mismatch):
 
-1. **Serve both series.** In `repo.conf`, set `SERIES` to the new series and add it to `SERVE` (for example
-   `SERIES=27.1`, `SERVE=26.7 27.1`). The old tree stays frozen at its last releases; every publish rebuilds it
-   from them.
+1. **Serve both series.** In `repo.conf`, set `SERIES` to the new series and add its tree to `SERVE`, which lists
+   `<ABI>/<series>` entries (for example `SERIES=27.1`, `SERVE=FreeBSD:15:amd64/26.7 FreeBSD:15:amd64/27.1`). The
+   old tree stays frozen at its last releases; every publish rebuilds it from them. While two trees are served,
+   the new one holds only what has been released for it, so the first publish into it succeeds.
 2. **Publish os-legotypes, then every plugin,** each with a `PLUGIN_REVISION` bump, so pkg on the new series
    sees a newer version.
 3. **Upgrade the firewall.** At its next boot, os-legotypes points the repository at the series it now runs.
@@ -88,4 +89,6 @@ When the canary's series issue opens (or `configctl legotypes check` reports a s
 4. **Retire the old tree.** Once the firewall runs the new series, drop the old series from `SERVE`; the next
    publish no longer deploys its tree.
 
-A new FreeBSD ABI follows the same steps, with `ABI` in place of `SERIES`.
+A new FreeBSD ABI follows the same steps: set `ABI` (and usually `SERIES`) to the new values and list both trees,
+each under its own ABI (for example `SERVE=FreeBSD:15:amd64/26.7 FreeBSD:16:amd64/27.7`), so a firewall still on
+the old ABI keeps finding its tree.

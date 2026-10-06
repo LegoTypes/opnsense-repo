@@ -2,9 +2,10 @@
 # Read repo.conf (REPO_CONF overrides its path).
 #   repo.sh abi            the package ABI builds target, e.g. FreeBSD:15:amd64
 #   repo.sh series         the series builds target, e.g. 26.7
-#   repo.sh serve          the series the site serves, one per line
-#   repo.sh tree [series]  site/<ABI>/<series>/latest (default: the target series;
-#                          the series must be served)
+#   repo.sh target         the target tree, <ABI>/<series>
+#   repo.sh serve          the trees the site serves, <ABI>/<series>, one per line
+#   repo.sh tree [entry]   site/<entry>/latest (default: the target; the entry must
+#                          be served)
 # A malformed file fails every command.
 set -eu
 
@@ -38,26 +39,31 @@ series() {
 	printf '%s\n' "$v"
 }
 
+target() { printf '%s/%s\n' "$(abi)" "$(series)"; }
+
 serve() {
-	target=$(series)
+	t=$(target)
 	list=$(value SERVE)
 	found=no
-	for s in $list; do
-		is_series "$s" || die "$conf: malformed series $s in SERVE"
-		[ "$s" != "$target" ] || found=yes
+	for e in $list; do
+		printf '%s\n' "$e" | grep -Eqx 'FreeBSD:[0-9]+:[a-z0-9_]+/[0-9]+\.[0-9]+' ||
+			die "$conf: SERVE entry $e is not <ABI>/<series>"
+		[ "$e" != "$t" ] || found=yes
 	done
-	[ "$found" = yes ] || die "$conf: SERVE must include SERIES $target"
-	for s in $list; do printf '%s\n' "$s"; done
+	[ "$found" = yes ] || die "$conf: SERVE must include the target $t"
+	for e in $list; do printf '%s\n' "$e"; done
 }
 
 case ${1:-} in
 abi) abi ;;
 series) series ;;
+target) target ;;
 serve) serve ;;
 tree)
-	s=${2:-$(series)}
-	serve | grep -qxF "$s" || die "series $s is not served"
-	printf 'site/%s/%s/latest\n' "$(abi)" "$s"
+	e=${2:-$(target)}
+	list=$(serve)
+	printf '%s\n' "$list" | grep -qxF "$e" || die "$e is not served"
+	printf 'site/%s/latest\n' "$e"
 	;;
-*) die "usage: repo.sh abi | series | serve | tree [series]" ;;
+*) die "usage: repo.sh abi | series | target | serve | tree [entry]" ;;
 esac
