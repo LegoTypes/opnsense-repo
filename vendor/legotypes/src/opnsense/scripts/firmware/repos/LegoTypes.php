@@ -27,11 +27,20 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-/* The firmware runs this after install: enable the repository from its sample. */
+/*
+ * The firmware runs this after install and at every boot (rc.bootup's
+ * system_firmware_configure): enable the repository from its sample, pointed at
+ * the series this firewall runs, so the boot after a series upgrade moves the
+ * repository along with it.
+ */
+
+require_once __DIR__ . '/../../LegoTypes/lib.php';
+
 $conf = '/usr/local/etc/pkg/repos/LegoTypes.conf';
 
 if (!file_exists($conf . '.sample')) {
     exit(0);
 }
 
-file_put_contents($conf, file_get_contents($conf . '.sample'));
+$series = trim((string)shell_exec('/usr/local/sbin/opnsense-version -a 2>/dev/null'));
+file_put_contents($conf, legotypes_conf_for((string)file_get_contents($conf . '.sample'), $series));
