@@ -289,5 +289,63 @@ trust "$T/other.pub"
 expect_fail "sign: a key os-legotypes does not trust (a half-done rotation)" vm sign-catalogue.sh
 expect_eq "sign: nothing published for an untrusted key" "$([[ -e $W/site/os-legotypes.pkg ]] && echo yes || echo no)" "no"
 
+# --- upstream.sh (stub curl serves a fake mirror) -----------------------------
+# mirror <series...>: a fake OPNsense mirror with those series under FreeBSD:15:amd64; the root
+# index links ABI directories as Apache does for names with a colon ("./FreeBSD:15:amd64/")
+mirror() {
+	export STUB_MIRROR="$T/mirror" STUB_MIRROR_URL=https://mirror.test UPSTREAM_MIRROR=https://mirror.test
+	rm -rf "$STUB_MIRROR"
+	mkdir -p "$STUB_MIRROR/FreeBSD:15:amd64"
+	printf '<a href="./FreeBSD:14:amd64/">FreeBSD:14:amd64/</a>\n<a href="./FreeBSD:15:amd64/">FreeBSD:15:amd64/</a>\n<a href="sets/">sets/</a>\n' \
+		>"$STUB_MIRROR/index.html"
+	local s
+	printf '<a href="snapshots/">snapshots/</a>\n' >"$STUB_MIRROR/FreeBSD:15:amd64/index.html"
+	for s in "$@"; do
+		printf '<a href="%s/">%s/</a>\n' "$s" "$s" >>"$STUB_MIRROR/FreeBSD:15:amd64/index.html"
+		mkdir -p "$STUB_MIRROR/FreeBSD:15:amd64/$s/latest"
+	done
+}
+# site <series> <json line...>: that series' catalogue (packagesite.pkg holding packagesite.yaml)
+site() {
+	local s=$1 d
+	shift
+	d=$(mktemp -d)
+	printf '%s\n' "$@" >"$d/packagesite.yaml"
+	tar -cf "$STUB_MIRROR/FreeBSD:15:amd64/$s/latest/packagesite.pkg" -C "$d" packagesite.yaml
+	rm -rf "$d"
+}
+core() { # core <version> <FreeBSD_version> <dependency names...>
+	local v=$1 f=$2
+	shift 2
+	jq -cn --arg v "$v" --arg f "$f" --args '{name: "opnsense", version: $v,
+		annotations: {FreeBSD_version: $f}, deps: ($ARGS.positional | map({key: ., value: {}}) | from_entries)}' "$@"
+}
+up() { REPO_CONF="$T/repo.conf" bash "$root/scripts/upstream.sh" "$@"; }
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=26.7'
+mirror 26.1 26.7
+site 26.7 "$(core 26.7.5 1501000 php85-curl php85-xml py313-requests pkg)" '{"name":"php85","version":"8.5.10"}'
+expect_eq "upstream facts" "$(up)" $'NEWEST=26.7\nNEXT_ABI=\nSERIES=26.7\nCORE=26.7.5\nPHP=85\nPYTHON=313\nFREEBSD=15.1'
+mirror 26.7 27.1
+site 26.7 "$(core 26.7.9 1501000 php85-curl py313-requests)"
+site 27.1 "$(core 27.1 1502000 php86-curl py314-requests)"
+expect_eq "newest series beside the target's facts" "$(up | grep -E '^(NEWEST|SERIES|PHP)=')" $'NEWEST=27.1\nSERIES=26.7\nPHP=85'
+expect_eq "facts for a named series" "$(up 27.1 | grep -E '^(SERIES|PHP|PYTHON|FREEBSD)=')" $'SERIES=27.1\nPHP=86\nPYTHON=314\nFREEBSD=15.2'
+printf '<a href="./FreeBSD:16:amd64/">FreeBSD:16:amd64/</a>\n' >>"$STUB_MIRROR/index.html"
+expect_eq "next FreeBSD major" "$(up | grep '^NEXT_ABI=')" "NEXT_ABI=FreeBSD:16:amd64"
+mirror 26.7
+expect_fail "target series without a catalogue" up
+site 26.7 "$(core 26.7.5 1501000 php84-curl php85-xml py313-requests)"
+expect_fail "core naming two PHP versions" up
+site 26.7 '{"name":"php85","version":"8.5.10"}'
+expect_fail "no core package" up
+site 26.7 "$(core 26.7.5 1501000 php85-curl)"
+expect_fail "core naming no Python" up
+mirror 26.7
+printf '<a href="sets/">sets/</a>\n' >"$STUB_MIRROR/index.html"
+expect_fail "mirror without our ABI" up
+rm -rf "$STUB_MIRROR"
+expect_fail "mirror unreachable" up
+unset STUB_MIRROR STUB_MIRROR_URL UPSTREAM_MIRROR
+
 echo "passed $pass, failed $failed"
 [[ $failed -eq 0 ]]
