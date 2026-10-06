@@ -17,6 +17,13 @@ row=$(sh scripts/packages.sh row "$package")
 read -r repo branch dir _catalogue <<ROW
 $row
 ROW
+series=$(sh scripts/repo.sh series)
+[ -n "${UPSTREAM_PHP:-}" ] && [ -n "${UPSTREAM_PYTHON:-}" ] ||
+	die "UPSTREAM_PHP and UPSTREAM_PYTHON must be set (bash scripts/upstream.sh)"
+case ${MK_FROM:-} in
+'' | upstream) ;;
+*) die "MK_FROM must be empty or upstream, not $MK_FROM" ;;
+esac
 
 # outside the workspace, so the plugins tree is not copied back to the runner
 work=$(mktemp -d /tmp/legotypes-build.XXXXXX)
@@ -37,7 +44,16 @@ else
 	source="Built from $repo, branch $branch, commit $(git -C "$work/tree" rev-parse HEAD)."
 fi
 
-make -C "$work/tree/$dir" package PLUGIN_DEVEL= PLUGIN_PHP=85 PLUGIN_PYTHON=313
+# the canary's rebased build: the packaging rules a rebase on upstream would bring
+if [ "${MK_FROM:-}" = upstream ]; then
+	git clone --quiet --depth 1 --branch master https://github.com/opnsense/plugins.git "$work/upstream"
+	rm -rf "$work/tree/Mk"
+	cp -R "$work/upstream/Mk" "$work/tree/Mk"
+	source="$source Mk/ from opnsense/plugins master $(git -C "$work/upstream" rev-parse HEAD)."
+fi
+
+make -C "$work/tree/$dir" package PLUGIN_DEVEL= PLUGIN_ABI="$series" \
+	PLUGIN_PHP="$UPSTREAM_PHP" PLUGIN_PYTHON="$UPSTREAM_PYTHON"
 
 set -- "$work/tree/$dir"/work/pkg/*.pkg
 [ $# -eq 1 ] && [ -f "$1" ] || die "expected one package, found: $*"
@@ -48,4 +64,6 @@ case $name in
 esac
 cp "$1" out/
 printf '%s\n' "$source" >out/source
+printf 'series: %s\nfreebsd: %s\nphp: %s\npython: %s\n' "$series" "$(freebsd-version -u)" \
+	"$UPSTREAM_PHP" "$UPSTREAM_PYTHON" >out/build
 echo "built $name. $source"

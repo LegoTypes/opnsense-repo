@@ -3,7 +3,7 @@
 # file name without .pkg) and holding that one .pkg. The notes say where it was
 # built from and carry its sha256, which carry-forward.sh checks.
 #   release.sh check <file.pkg>            fail if the tag exists; print the tag
-#   release.sh create <file.pkg> <source>  create the release (<source>: one line)
+#   release.sh create <file.pkg> <source> [<build>]   create the release (<source>: one line; <build>: key: value lines)
 # gh takes the repository from GH_REPO and the token from GH_TOKEN (or its login).
 set -euo pipefail
 
@@ -44,14 +44,19 @@ check() {
 }
 
 create() {
-	local file=$1 source=$2 tag sum
+	local file=$1 source=$2 build=${3:-} tag sum notes
 	[[ -n $source && $source != *$'\n'* ]] || die "the source must be one non-empty line"
 	tag=$(check "$file")
 	sum=$(sha256sum "$file" | awk '{print $1}')
+	notes=$source
+	if [[ -n $build ]]; then
+		[[ -s $build ]] || die "$build: no build environment"
+		notes=$(printf '%s\n\n%s' "$notes" "$(cat "$build")")
+	fi
 	local target=()
 	[[ -z ${GITHUB_SHA:-} ]] || target=(--target "$GITHUB_SHA")
 	gh release create "$tag" "$file" --title "$tag" "${target[@]}" \
-		--notes "$(printf '%s\n\nsha256: %s' "$source" "$sum")"
+		--notes "$(printf '%s\n\nsha256: %s' "$notes" "$sum")"
 	printf '%s\n' "$tag"
 }
 
@@ -61,10 +66,10 @@ check)
 	check "$2"
 	;;
 create)
-	[[ $# -eq 3 ]] || die "usage: release.sh create <file.pkg> <source>"
-	create "$2" "$3"
+	[[ $# -eq 3 || $# -eq 4 ]] || die "usage: release.sh create <file.pkg> <source> [<build>]"
+	create "$2" "$3" "${4:-}"
 	;;
 *)
-	die "usage: release.sh check <file.pkg> | release.sh create <file.pkg> <source>"
+	die "usage: release.sh check <file.pkg> | release.sh create <file.pkg> <source> [<build>]"
 	;;
 esac

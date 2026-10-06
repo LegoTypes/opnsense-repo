@@ -6,7 +6,21 @@ set -eu
 	echo "stub make: unsupported: $*" >&2
 	exit 2
 }
+for v in PLUGIN_ABI PLUGIN_PHP PLUGIN_PYTHON; do
+	case " $* " in
+	*" $v="[0-9]*) ;;
+	*)
+		echo "stub make: $v not passed" >&2
+		exit 3
+		;;
+	esac
+done
+# STUB_FAIL_DIR: a directory whose build fails, as a broken package would
+case $2 in
+*"${STUB_FAIL_DIR:-//none//}") exit 1 ;;
+esac
 mkdir -p "$2/work/pkg"
-for f in $STUB_PKGS; do
+# STUB_PKGS names the files to produce; unset, the package is os-<directory name>-1.0
+for f in ${STUB_PKGS-os-$(basename "$2")-1.0.pkg}; do
 	echo "package $f" >"$2/work/pkg/$f"
 done
