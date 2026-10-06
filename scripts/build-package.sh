@@ -41,7 +41,8 @@ if [ "$repo" = . ]; then
 	git clone --quiet --depth 1 --branch master https://github.com/LegoTypes/plugins.git "$work/tree"
 	mkdir -p "$work/tree/$(dirname "$dir")"
 	cp -R "$dir" "$work/tree/$dir"
-	changed=$(git log -1 --format=%H -- "$dir")
+	# the workspace synced into the VM keeps the runner's owner, so git needs it named safe
+	changed=$(git -c safe.directory="$PWD" log -1 --format=%H -- "$dir")
 	[ -n "$changed" ] || die "cannot find the last commit that changed $dir (a shallow checkout? check out with fetch-depth: 0)"
 	source="Built from $GITHUB_REPOSITORY, $dir, commit $changed (workflow run at $GITHUB_SHA), in LegoTypes/plugins master $(git -C "$work/tree" rev-parse HEAD)."
 else
