@@ -69,4 +69,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: bash scripts/release.sh create out/*.pkg "$(cat out/source)"
+        run: bash scripts/release.sh create out/*.pkg "$(cat out/source)" out/build

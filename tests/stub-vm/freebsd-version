@@ -1,0 +1,3 @@
+#!/bin/sh
+# A stand-in for freebsd-version -u in the build VM.
+echo 15.1-RELEASE-p3

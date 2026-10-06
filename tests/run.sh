@@ -117,6 +117,12 @@ GITHUB_SHA=abc123 rel create "$T/out/os-alpha-1.1.pkg" "Built from Org/plugins, 
 expect_eq "create header" "$(head -1 "$STUB/created")" "os-alpha-1.1|os-alpha-1.1.pkg|abc123"
 expect_eq "create source line" "$(sed -n 2p "$STUB/created")" "Built from Org/plugins, branch b, commit 1234567."
 expect_eq "create sha line" "$(grep '^sha256: ' "$STUB/created")" "sha256: $(sum "$T/out/os-alpha-1.1.pkg")"
+printf 'series: 26.7\nphp: 85\n' >"$T/out/build"
+echo two >"$T/out/os-alpha-1.2.pkg"
+rel create "$T/out/os-alpha-1.2.pkg" "Built from here." "$T/out/build" >/dev/null
+expect_eq "create with the build environment" "$(sed -n '/^os-alpha-1.2|/,$p' "$STUB/created" | sed -n '2,5p')" \
+	$'Built from here.\n\nseries: 26.7\nphp: 85'
+expect_fail "create with a missing build file" rel create "$T/out/os-alpha-1.2.pkg" "src" "$T/out/none"
 expect_fail "create existing" rel create "$T/out/os-alpha-1.0.pkg" "src"
 expect_fail "create empty source" rel create "$T/out/os-alpha-1.1.pkg" ""
 expect_fail "create two-line source" rel create "$T/out/os-alpha-1.1.pkg" $'a\nb'
@@ -227,18 +233,25 @@ commit=0123456789abcdef0123456789abcdef01234567
 conf 'os-alpha   Org/plugins br-alpha net/alpha yes' \
 	'os-vendor  .           main     vendor/v  yes'
 vmdir
-vmenv STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha >/dev/null
-expect_eq "build: one package in out/" "$(names "$W/out")" "os-alpha-1.1.pkg source "
+vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha >/dev/null
+expect_eq "build: one package in out/" "$(names "$W/out")" "build os-alpha-1.1.pkg source "
 expect_eq "build: source line" "$(cat "$W/out/source")" "Built from Org/plugins, branch br-alpha, commit $commit."
-expect_fail "build: a -devel package" vmenv STUB_PKGS=os-alpha-devel-1.1.pkg -- build-package.sh os-alpha
-expect_fail "build: two packages" vmenv "STUB_PKGS=os-alpha-1.1.pkg os-alpha-1.0.pkg" -- build-package.sh os-alpha
-expect_fail "build: no package" vmenv STUB_PKGS= -- build-package.sh os-alpha
-expect_fail "build: not in packages.conf" vmenv STUB_PKGS=os-gamma-1.0.pkg -- build-package.sh os-gamma
-vmenv STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface -- build-package.sh os-vendor >/dev/null
+expect_eq "build: the build environment" "$(cat "$W/out/build")" \
+	$'series: 26.7\nfreebsd: 15.1-RELEASE-p3\nphp: 85\npython: 313'
+expect_fail "build: no upstream PHP" vmenv UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha
+vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-1.1.pkg MK_FROM=upstream -- build-package.sh os-alpha >/dev/null
+expect_eq "build: with upstream Mk/" "$(cat "$W/out/source")" \
+	"Built from Org/plugins, branch br-alpha, commit $commit. Mk/ from opnsense/plugins master $commit."
+expect_fail "build: an unknown MK_FROM" vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-1.1.pkg MK_FROM=elsewhere -- build-package.sh os-alpha
+expect_fail "build: a -devel package" vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-devel-1.1.pkg -- build-package.sh os-alpha
+expect_fail "build: two packages" vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 "STUB_PKGS=os-alpha-1.1.pkg os-alpha-1.0.pkg" -- build-package.sh os-alpha
+expect_fail "build: no package" vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS= -- build-package.sh os-alpha
+expect_fail "build: not in packages.conf" vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-gamma-1.0.pkg -- build-package.sh os-gamma
+vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface -- build-package.sh os-vendor >/dev/null
 expect_eq "build: this repository's package" "$(cat "$W/out/source")" \
 	"Built from Org/repo, vendor/v, commit feedface, in LegoTypes/plugins master $commit."
 expect_fail "build: this repository's package without GITHUB_SHA" \
-	vmenv STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo -- build-package.sh os-vendor
+	vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo -- build-package.sh os-vendor
 
 conf 'os-alpha      Org/plugins br   net/alpha        yes' \
 	'os-beta       Org/plugins br   net/beta         no' \

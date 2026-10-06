@@ -13,6 +13,8 @@ clone)
 	done
 	mkdir -p "$2"
 	echo "$1 $branch" >"$2/.cloned"
+	mkdir -p "$2/Mk"
+	echo "Mk from $1" >"$2/Mk/plugins.mk"
 	;;
 -C) echo 0123456789abcdef0123456789abcdef01234567 ;;
 *)
