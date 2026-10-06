@@ -1,25 +1,40 @@
 #!/usr/bin/env bash
-# A stand-in for curl. URLs under $STUB_MIRROR_URL are served from $STUB_MIRROR
-# (a URL ending in / maps to that directory's index.html); every other URL, such
-# as the file:// ones carry-forward.sh reads, goes to the real curl. Honours -o.
+# A stand-in for curl. URLs under $STUB_MIRROR_URL are served from $STUB_MIRROR and
+# URLs under $STUB_LIVE_URL from $STUB_LIVE (a URL ending in / maps to that
+# directory's index.html; a file <name>.status holding an HTTP code makes the server
+# answer with that code instead). Every other URL goes to the real curl. Honours
+# -o, -f and -w '%{http_code}'.
 set -euo pipefail
-args=("$@") out='' url=''
+args=("$@") out='' url='' fail=no wfmt=''
 while [[ $# -gt 0 ]]; do
 	case $1 in
 	-o) out=$2 && shift 2 ;;
-	-*) shift ;;
+	-w) wfmt=$2 && shift 2 ;;
+	-*) [[ $1 == -*f* && $1 != --* ]] && fail=yes
+		shift ;;
 	*) url=$1 && shift ;;
 	esac
 done
+root=''
 if [[ -n ${STUB_MIRROR_URL:-} && $url == "$STUB_MIRROR_URL"* ]]; then
-	path=${url#"$STUB_MIRROR_URL"}
-	[[ $path == */ || -z $path ]] && path="${path}index.html"
-	f="$STUB_MIRROR/$path"
-	[[ -f $f ]] || {
-		echo "curl: (22) The requested URL returned error: 404" >&2
-		exit 22
-	}
-	if [[ -n $out ]]; then cp "$f" "$out"; else cat "$f"; fi
+	root=$STUB_MIRROR base=$STUB_MIRROR_URL
+elif [[ -n ${STUB_LIVE_URL:-} && $url == "$STUB_LIVE_URL"* ]]; then
+	root=$STUB_LIVE base=$STUB_LIVE_URL
 else
 	exec /usr/bin/curl "${args[@]}"
 fi
+path=${url#"$base"}
+[[ $path == */ || -z $path ]] && path="${path}index.html"
+f="$root/$path"
+code=200
+if [[ -f $f.status ]]; then code=$(cat "$f.status"); elif [[ ! -f $f ]]; then code=404; fi
+if [[ $code != 200 ]]; then
+	if [[ $fail == yes ]]; then
+		echo "curl: (22) The requested URL returned error: $code" >&2
+		exit 22
+	fi
+	[[ -z $wfmt ]] || printf '%s' "$code"
+	exit 0
+fi
+if [[ -n $out ]]; then cp "$f" "$out"; else cat "$f"; fi
+[[ -z $wfmt ]] || printf '%s' "$code"

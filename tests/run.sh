@@ -107,7 +107,7 @@ live() {
 	mkdir -p "$d"
 	for nv in "$@"; do printf 'Name           : %s\nVersion        : %s\nOrigin         : opnsense/%s\n\n' "${nv%-*}" "${nv##*-}" "${nv%-*}"; done >"$d/packages.txt"
 }
-export LIVE_SITE="file://$T/livesite"
+export LIVE_SITE=https://live.test STUB_LIVE_URL=https://live.test STUB_LIVE="$T/livesite"
 names() { (cd "$1" && printf '%s ' *); }
 # cf <built>: carry-forward in $T/cfw with $T/packages.conf and $T/repo.conf; trees land under $T/cfw/site
 cf() { (rm -rf "$T/cfw" && mkdir -p "$T/cfw" && cd "$T/cfw" && PACKAGES_CONF="$T/packages.conf" REPO_CONF="$T/repo.conf" bash "$root/scripts/carry-forward.sh" "$@"); }
@@ -170,6 +170,11 @@ live os-alpha-1.1 os-vendor-1.0_1
 expect_fail "live lacks a catalogue package that has a release" cf os-vendor
 rm -r "$T/livesite"
 expect_fail "live catalogue unreadable" cf os-vendor
+mkdir -p "$T/livesite/FreeBSD:15:amd64/26.7/latest"
+echo 503 >"$T/livesite/FreeBSD:15:amd64/26.7/latest/packages.txt.status"
+expect_eq "a live site that answers 503 is unreadable, not empty" \
+	"$(cf os-vendor 2>&1 >/dev/null | grep -c 'cannot read')" "1"
+rm "$T/livesite/FreeBSD:15:amd64/26.7/latest/packages.txt.status"
 publish os-vendor-1.0_2 2026-01-06T00:00:00Z "$(printf '0%.0s' {1..64})"
 live os-alpha-1.1 os-alpha-extra-2.0 os-vendor-1.0_2
 expect_fail "sha256 mismatch" cf os-alpha
@@ -436,6 +441,10 @@ site 27.1 "$(core 27.1 1502000 php86-curl py314-requests)"
 expect_eq "newest series beside the target's facts" "$(up | grep -E '^(NEWEST|SERIES|PHP)=')" $'NEWEST=27.1\nSERIES=26.7\nPHP=85'
 expect_eq "facts for a named series" "$(up 27.1 | grep -E '^(SERIES|PHP|PYTHON|FREEBSD)=')" $'SERIES=27.1\nPHP=86\nPYTHON=314\nFREEBSD=15.2'
 printf '<a href="./FreeBSD:16:amd64/">FreeBSD:16:amd64/</a>\n' >>"$STUB_MIRROR/index.html"
+mkdir -p "$STUB_MIRROR/FreeBSD:16:amd64"
+printf '<a href="snapshots/">snapshots/</a>\n' >"$STUB_MIRROR/FreeBSD:16:amd64/index.html"
+expect_eq "a next FreeBSD major with only snapshots is not reported yet" "$(up | grep '^NEXT_ABI=')" "NEXT_ABI="
+printf '<a href="27.7/">27.7/</a>\n' >>"$STUB_MIRROR/FreeBSD:16:amd64/index.html"
 expect_eq "next FreeBSD major" "$(up | grep '^NEXT_ABI=')" "NEXT_ABI=FreeBSD:16:amd64"
 mirror 26.7
 expect_fail "target series without a catalogue" up
@@ -520,8 +529,8 @@ expect_eq "findings: a difference both builds show is reported once" "$(fd)" \
 cfdir
 rm "$T/cf/fresh.pkg"
 echo "make: error 1" >"$T/cf/fresh.tail"
-expect_eq "findings: a failed build is material" "$(fd)" \
-	$'MATERIAL: building the branch as a publish would failed: make: error 1\nrc=1'
+expect_eq "findings: a failed build is material, with the end of its log" "$(fd)" \
+	$'MATERIAL: building the branch as a publish would failed; the end of its log:\nLOG: make: error 1\nrc=1'
 cfdir
 echo "Built from Org/plugins, branch b, commit 2222222bbbb." >"$T/cf/fresh.source"
 expect_eq "findings: unreleased commits are a note" "$(fd)" \
@@ -531,6 +540,15 @@ rm "$T/cf/published.pkg" "$T/cf/notes"
 expect_eq "findings: no release yet is a note" "$(fd)" $'NOTE: os-alpha has no release yet; nothing to compare\nrc=0'
 
 crep() { bash "$root/scripts/canary-report.sh" "canary: os-alpha" "$T/findings" "https://run/1"; }
+reset_stub
+printf 'MATERIAL: build failed\nLOG: cc: error one\nLOG: *** Error code 1\n' >"$T/findings"
+crep >/dev/null
+expect_eq "report: log lines become one code block" "$(sed -n '/^```$/,/^```$/p' "$STUB/issue_calls" | tr '\n' '|')" \
+	'```|cc: error one|*** Error code 1|```|'
+: >"$STUB/issue_calls"
+{ echo "MATERIAL: build failed"; for i in $(seq 1 3000); do printf 'LOG: %050d\n' "$i"; done; } >"$T/findings"
+crep >/dev/null
+expect_eq "report: the body stays under GitHub's limit" "$(($(wc -c <"$STUB/issue_calls") < 65000))" "1"
 reset_stub
 printf 'MATERIAL: x\nNOTE: y\n' >"$T/findings"
 expect_eq "report: opens an issue" "$(crep)" "opened"
@@ -561,7 +579,7 @@ conf 'os-alpha  Org/plugins br net/alpha yes' \
 vmdir
 vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_FAIL_DIR=net/beta -- canary-vm.sh >/dev/null
 expect_eq "canary-vm: both builds of a good package" "$(names "$W/canary/os-alpha")" "fresh.pkg fresh.source rebased.pkg "
-expect_eq "canary-vm: a failing package does not stop the rest" "$(names "$W/canary/os-beta")" "fresh.tail rebased.tail "
+expect_eq "canary-vm: a failing package does not stop the rest, and keeps its logs" "$(names "$W/canary/os-beta")" "fresh.log fresh.tail rebased.log rebased.tail "
 
 cw="$T/cw"
 rm -rf "$cw"
@@ -576,6 +594,14 @@ rc=$?
 expect_eq "canary: a failed build makes the run fail" "$rc" "1"
 expect_eq "canary: one report per package, then the series" "$out" $'clean\nopened\nclean'
 expect_eq "canary: the failing package's issue" "$(cut -s -d'|' -f1,2 "$STUB/issue_calls")" "create|canary: os-beta"
+expect_eq "canary: package issues carry the upstream facts" "$(grep -c 'NOTE\*\*: upstream PHP=85' "$STUB/issue_calls")" "1"
+publish os-alpha-1.0 2026-01-01T00:00:00Z
+rm "$STUB/assets/os-alpha-1.0/os-alpha-1.0.pkg"
+: >"$STUB/issue_calls"
+out=$(canary_run)
+expect_eq "canary: a release that cannot be fetched is reported and the run goes on" "$out" $'opened\nopened\nclean'
+expect_eq "canary: the fetch failure is in the issue" "$(grep -c 'could not fetch os-alpha-1.0' "$STUB/issue_calls")" "1"
+reset_stub
 printf 'NEWEST=27.1\nNEXT_ABI=FreeBSD:16:amd64\nSERIES=26.7\nCORE=26.7.9\nPHP=85\nPYTHON=313\nFREEBSD=15.1\n' >"$cw/upstream.env"
 : >"$STUB/issue_calls"
 canary_run >/dev/null
@@ -595,7 +621,8 @@ live os-alpha-1.1
 d="$T/livesite/FreeBSD:15:amd64/26.7/latest"
 echo "catalogue data" >"$T/data"
 openssl dgst -sha256 -r "$T/data" | cut -d' ' -f1 | tr -d '\n' | openssl dgst -sha256 -sign "$T/key.pem" -binary >"$T/data.sig"
-tar -cf "$d/data.pkg" -C "$T" data data.sig
+cp "$T/pub.pem" "$T/data.pub"
+tar -cf "$d/data.pkg" -C "$T" data data.sig data.pub
 vc() { REPO_CONF="$T/repo.conf" PUB_KEY="$T/pub.pem" bash "$root/scripts/verify-catalogue.sh" "$@"; }
 expect_eq "verify: a good publish" "$(vc os-alpha >/dev/null; echo "rc=$?")" "rc=0"
 live os-alpha-1.0
@@ -604,6 +631,10 @@ live os-alpha-1.1
 openssl dgst -sha256 -r "$T/data" | cut -d' ' -f1 | tr -d '\n' | openssl dgst -sha256 -sign "$T/other.pem" -binary >"$T/data.sig"
 tar -cf "$d/data.pkg" -C "$T" data data.sig
 expect_fail "verify: a signature the published key does not verify" vc os-alpha
+openssl dgst -sha256 -r "$T/data" | cut -d' ' -f1 | tr -d '\n' | openssl dgst -sha256 -sign "$T/key.pem" -binary >"$T/data.sig"
+openssl rsa -in "$T/other.pem" -pubout -out "$T/data.pub" 2>/dev/null
+tar -cf "$d/data.pkg" -C "$T" data data.sig data.pub
+expect_fail "verify: a catalogue carrying a key other than the published one" vc os-alpha
 
 echo "passed $pass, failed $failed"
 [[ $failed -eq 0 ]]

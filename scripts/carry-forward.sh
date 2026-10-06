@@ -34,8 +34,17 @@ releases=$(gh release list --limit 1000 --json tagName,publishedAt) || die "cann
 
 for entry in $served; do
 	tree=$(sh "$here/repo.sh" tree "$entry")
-	# what that tree serves now (nothing yet for a series being added)
-	live=$(curl -fsSL "$LIVE_SITE/${tree#site/}/packages.txt" 2>/dev/null || true)
+	# what that tree serves now: nothing yet (404) for a tree being added; any other
+	# answer than 200 or 404 means the site cannot be read, which is not "empty"
+	url="$LIVE_SITE/${tree#site/}/packages.txt"
+	livef=$(mktemp)
+	code=$(curl -sSL -o "$livef" -w '%{http_code}' "$url") || die "cannot reach $url"
+	case $code in
+	200) live=$(cat "$livef") ;;
+	404) live='' ;;
+	*) die "cannot read $url (HTTP $code): the site may be down; run the publish again later" ;;
+	esac
+	rm -f "$livef"
 	while read -r pkg <&3; do
 		tag=$(RELEASES_JSON="$releases" bash "$here/newest-release.sh" "$pkg" "$entry")
 		live_version=$(awk -v p="$pkg" '$1 == "Name" && $3 == p { getline; if ($1 == "Version") print $3 }' <<<"$live")

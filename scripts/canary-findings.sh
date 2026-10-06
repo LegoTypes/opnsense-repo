@@ -20,11 +20,19 @@ say() {
 	printf '%s: %s\n' "$1" "$2"
 	[[ $1 != MATERIAL ]] || material=1
 }
-last_log_line() { tail -n 1 "$1" 2>/dev/null || echo "no log"; }
+# a failed build: the finding, then the last 20 lines of its log as LOG lines
+failed() {
+	if [[ -s $2 ]]; then
+		say MATERIAL "$1; the end of its log:"
+		tail -n 20 "$2" | sed 's/^/LOG: /'
+	else
+		say MATERIAL "$1; no log was kept"
+	fi
+}
 
 # a failed build is material whether or not there is a release to compare with
-[[ -f $d/fresh.pkg ]] || say MATERIAL "building the branch as a publish would failed: $(last_log_line "$d/fresh.tail")"
-[[ -f $d/rebased.pkg ]] || say MATERIAL "building with upstream Mk/ failed: $(last_log_line "$d/rebased.tail")"
+[[ -f $d/fresh.pkg ]] || failed "building the branch as a publish would failed" "$d/fresh.tail"
+[[ -f $d/rebased.pkg ]] || failed "building with upstream Mk/ failed" "$d/rebased.tail"
 if [[ ! -f $d/published.pkg ]]; then
 	say NOTE "$pkg has no release yet; nothing to compare"
 	exit "$material"

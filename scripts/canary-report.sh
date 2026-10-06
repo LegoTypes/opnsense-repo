@@ -2,8 +2,9 @@
 # canary-report.sh <title> <findings-file> <run-url>
 # Keep one open issue (label "canary") per title in step with canary-findings.sh
 # output: any MATERIAL line opens the issue or replaces its body; none closes an
-# open one with a comment. Prints opened, updated, closed or clean. An unreadable
-# issue list fails the script, so it can never open a duplicate.
+# open one with a comment. LOG lines (a failed build's log) become one code block.
+# The body is cut to stay within GitHub's limit. Prints opened, updated, closed or
+# clean. An unreadable issue list fails the script, so it can never open a duplicate.
 # gh takes the repository from GH_REPO and the token from GH_TOKEN.
 set -euo pipefail
 
@@ -23,9 +24,18 @@ number=$(jq -r --arg t "$title" '[.[] | select(.title == $t)] | if length > 1 th
 [[ $number != many ]] || die "two open issues are titled $title; close one"
 
 if grep -q '^MATERIAL: ' "$findings"; then
+	findings_md=$(awk '
+		/^LOG: / { if (!inlog) { print "```"; inlog = 1 } print substr($0, 6); next }
+		{ if (inlog) { print "```"; inlog = 0 } sub(/^MATERIAL: /, "- **MATERIAL**: "); sub(/^NOTE: /, "- **NOTE**: "); print }
+		END { if (inlog) print "```" }
+	' "$findings")
+	limit=60000
+	if [[ ${#findings_md} -gt $limit ]]; then
+		findings_md="${findings_md:0:$limit}"$'\n```\n(cut: the full log is in the run\'s canary artifact)'
+	fi
 	body=$(printf '%s\n\n%s\n\nRun: %s\n' \
 		"The canary found what is published differing from what a build would produce now." \
-		"$(sed -E 's/^(MATERIAL|NOTE): /- **\1**: /' "$findings")" "$run")
+		"$findings_md" "$run")
 	if [[ -n $number ]]; then
 		gh issue edit "$number" --body "$body" >/dev/null
 		echo updated
