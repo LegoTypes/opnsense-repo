@@ -41,6 +41,30 @@ expect_fail "usage" pk
 expect_eq "real file: catalogue" "$(sh "$root/scripts/packages.sh" catalogue | tr '\n' ' ')" \
 	"os-wg-client-tunnels os-mac-alias-cache os-wan-failover os-legotypes "
 
+# --- repo.sh -----------------------------------------------------------------
+rc() { printf '%s\n' "$@" >"$T/repo.conf"; }
+rp() { REPO_CONF="$T/repo.conf" sh "$root/scripts/repo.sh" "$@"; }
+rc '# served repository' 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=26.7 27.1'
+expect_eq "repo abi" "$(rp abi)" "FreeBSD:15:amd64"
+expect_eq "repo series" "$(rp series)" "26.7"
+expect_eq "repo serve" "$(rp serve | tr '\n' ' ')" "26.7 27.1 "
+expect_eq "repo tree" "$(rp tree)" "site/FreeBSD:15:amd64/26.7/latest"
+expect_eq "repo tree of a served series" "$(rp tree 27.1)" "site/FreeBSD:15:amd64/27.1/latest"
+expect_fail "repo tree of a series not served" rp tree 25.1
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=27.1' 'SERVE=26.7'
+expect_fail "SERVE must include SERIES" rp serve
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERIES=27.1' 'SERVE=26.7'
+expect_fail "SERIES set twice" rp series
+rc 'ABI=freebsd15' 'SERIES=26.7' 'SERVE=26.7'
+expect_fail "malformed ABI" rp abi
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26' 'SERVE=26'
+expect_fail "malformed series" rp series
+expect_eq "real file: tree" "$(sh "$root/scripts/repo.sh" tree)" "site/FreeBSD:15:amd64/26.7/latest"
+choices=$(awk '/^ *options:/ { o = 1; next } o && /^ *- / { print $2; next } o { exit }' \
+	"$root/.github/workflows/publish.yml" | sort | tr '\n' ' ')
+expect_eq "publish.yml offers exactly the catalogue" "$choices" \
+	"$(sh "$root/scripts/packages.sh" catalogue | sort | tr '\n' ' ')"
+
 # --- release.sh and carry-forward.sh -----------------------------------------
 export PATH="$root/tests/stub:$PATH" GH_REPO=Org/repo
 unset GITHUB_SHA
@@ -174,6 +198,7 @@ vmdir() {
 	mkdir -p "$W/keys" "$W/vendor/v"
 	cp -R "$root/scripts" "$W/"
 	cp "$T/packages.conf" "$W/packages.conf"
+	printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=26.7\n' >"$W/repo.conf"
 	cp "$T/pub.pem" "$W/keys/legotypes-pkg-signing.pub"
 	trust "$T/pub.pem"
 }
@@ -238,6 +263,7 @@ expect_eq "sign: bootstrap package" "$(cat "$W/site/os-legotypes.pkg")" "built"
 expect_eq "sign: public key published" "$(cat "$W/site/legotypes-pkg-signing.pub")" "$(cat "$T/pub.pem")"
 expect_eq "sign: packages.txt names both" "$(grep '^Name' "$W/site/packages.txt" | tr '\n' ' ')" \
 	"Name : os-alpha-1.1 Name : os-legotypes-1.0_2 "
+expect_eq "sign: the tree has its own packages.txt" "$(cat "$W/$R/packages.txt")" "$(cat "$W/site/packages.txt")"
 expect_eq "sign: key removed" "$(names "$W/.signing")" "* "
 signdir os-alpha-1.1.pkg os-beta-9.0.pkg
 expect_fail "sign: a release-only package in the catalogue" vm sign-catalogue.sh

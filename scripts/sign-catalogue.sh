@@ -6,7 +6,7 @@
 # Pages site: the bootstrap os-legotypes.pkg, the public key and packages.txt.
 set -eu
 
-R="site/FreeBSD:15:amd64/26.7/latest"
+R=$(sh scripts/repo.sh tree)
 PUB=keys/legotypes-pkg-signing.pub
 TRUSTED=vendor/legotypes/src/etc/pkg/fingerprints/LegoTypes/trusted
 
@@ -73,6 +73,7 @@ cp "$PUB" site/legotypes-pkg-signing.pub
 for p in "$R"/All/*.pkg; do
 	pkg info -F "$p" | head -3
 	echo
-done >site/packages.txt
+done >"$R/packages.txt"
+cp "$R/packages.txt" site/packages.txt
 cat site/packages.txt
 ls -l "$R"
