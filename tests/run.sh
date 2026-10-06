@@ -323,8 +323,10 @@ expect_fail "build: two packages" vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 "STU
 expect_fail "build: no package" vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS= -- build-package.sh os-alpha
 expect_fail "build: not in packages.conf" vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-gamma-1.0.pkg -- build-package.sh os-gamma
 vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface -- build-package.sh os-vendor >/dev/null
-expect_eq "build: this repository's package" "$(cat "$W/out/source")" \
-	"Built from Org/repo, vendor/v, commit feedface, in LegoTypes/plugins master $commit."
+expect_eq "build: this repository's package names the last commit that changed it" "$(cat "$W/out/source")" \
+	"Built from Org/repo, vendor/v, commit abcdef0123456789abcdef0123456789abcdef01 (workflow run at feedface), in LegoTypes/plugins master $commit."
+expect_fail "build: this repository's package from a shallow checkout" \
+	vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface STUB_GIT_SHALLOW=1 -- build-package.sh os-vendor
 expect_fail "build: this repository's package without GITHUB_SHA" \
 	vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo -- build-package.sh os-vendor
 
@@ -531,6 +533,11 @@ rm "$T/cf/fresh.pkg"
 echo "make: error 1" >"$T/cf/fresh.tail"
 expect_eq "findings: a failed build is material, with the end of its log" "$(fd)" \
 	$'MATERIAL: building the branch as a publish would failed; the end of its log:\nLOG: make: error 1\nrc=1'
+cfdir
+echo "garbage" >"$T/cf/fresh.pkg"
+mkpkg "$T/cf/rebased.pkg" "$(mod '.annotations.product_abi = "27.1"')"
+expect_eq "findings: when the as-published build cannot be compared, rebased differences are not blamed on Mk/" "$(fd)" \
+	$'MATERIAL: the build as a publish would make it could not be compared with the release\nMATERIAL: a build with upstream Mk/ differs from the release in product_abi: "26.7" -> "27.1" (the as-published build could not be compared)\nrc=1'
 cfdir
 echo "Built from Org/plugins, branch b, commit 2222222bbbb." >"$T/cf/fresh.source"
 expect_eq "findings: unreleased commits are a note" "$(fd)" \

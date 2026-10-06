@@ -2,6 +2,9 @@
 # A stand-in for the git calls build-package.sh makes in the VM.
 #   git clone --quiet --depth 1 --branch <branch> <url> <dir>   records "<url> <branch>" in <dir>/.cloned
 #   git -C <dir> rev-parse [--short] HEAD                          prints a fixed commit
+#   git log -1 --format=%H -- <dir>                                prints another fixed commit, the
+#                                                                  last change to <dir> (nothing when
+#                                                                  STUB_GIT_SHALLOW is set)
 set -eu
 case $1 in
 clone)
@@ -17,6 +20,7 @@ clone)
 	echo "Mk from $1" >"$2/Mk/plugins.mk"
 	;;
 -C) echo 0123456789abcdef0123456789abcdef01234567 ;;
+log) [ -n "${STUB_GIT_SHALLOW:-}" ] || echo abcdef0123456789abcdef0123456789abcdef01 ;;
 *)
 	echo "stub git: unsupported: $*" >&2
 	exit 2
