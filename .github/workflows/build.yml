@@ -58,6 +58,14 @@ jobs:
             exit 1
           fi
 
+      # PHP and Python of the series we build for, from OPNsense's mirror; the run
+      # fails rather than build with stale values, before any secret is staged
+      - name: Upstream facts
+        run: |
+          bash scripts/upstream.sh > upstream.env
+          cat upstream.env
+          sed -n 's/^\(PHP\|PYTHON\)=/UPSTREAM_\1=/p' upstream.env >> "$GITHUB_ENV"
+
       - name: Carry forward the other catalogue packages
         if: inputs.catalogue
         env:
@@ -82,14 +90,6 @@ jobs:
           umask 077
           mkdir -p .signing
           printf '%s\n' "$PKG_SIGNING_KEY" > .signing/key
-
-      # PHP and Python of the series we build for, from OPNsense's mirror; the run
-      # fails rather than build with stale values
-      - name: Upstream facts
-        run: |
-          bash scripts/upstream.sh > upstream.env
-          cat upstream.env
-          sed -n 's/^\(PHP\|PYTHON\)=/UPSTREAM_\1=/p' upstream.env >> "$GITHUB_ENV"
 
       - name: Build in FreeBSD 15
         uses: vmactions/freebsd-vm@a2f9a41fa97f6848b8c3b791087dfcdaa5b473ff # v1.5.8

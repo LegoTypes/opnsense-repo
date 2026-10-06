@@ -40,8 +40,12 @@ listing() {
 
 root=$(listing "$mirror/")
 grep -qxF "$abi" <<<"$root" || die "$mirror/ has no $abi"
+# the next ABI counts once it holds a series, not while it holds only snapshots
 next_abi=''
-if grep -qxF "$next" <<<"$root"; then next_abi=$next; fi
+if grep -qxF "$next" <<<"$root"; then
+	page=$(curl -fsSL "$mirror/$next/" 2>/dev/null || true)
+	if grep -oE 'href="(\./)?[0-9]+\.[0-9]+/"' <<<"$page" >/dev/null; then next_abi=$next; fi
+fi
 newest=$(listing "$mirror/$abi/" | grep -E '^[0-9]+\.[0-9]+$' | sort -t. -k1,1n -k2,2n | tail -n 1 || true)
 [[ -n $newest ]] || die "$mirror/$abi/ lists no series"
 
