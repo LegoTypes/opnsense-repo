@@ -8,7 +8,13 @@
 #   created              gh release create appends "<tag>|<file>|<target>" and the notes
 set -euo pipefail
 case "$1 $2" in
-"release list") cat "$STUB/releases.json" ;;
+"release list")
+	[[ ! -e $STUB/fail_list ]] || {
+		echo "HTTP 502" >&2
+		exit 1
+	}
+	cat "$STUB/releases.json"
+	;;
 "release view")
 	[[ -f $STUB/notes/$3 ]] || {
 		echo "release not found" >&2

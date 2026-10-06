@@ -191,6 +191,26 @@ expect_fail "notes without sha256" cf os-alpha "$T/cat6"
 printf 'sha256: %s\nsha256: %s\n' "$(sum "$STUB/assets/os-vendor-1.0/os-vendor-1.0.pkg")" "$(sum "$STUB/assets/os-vendor-1.0/os-vendor-1.0.pkg")" >"$STUB/notes/os-vendor-1.0"
 expect_fail "notes with two sha256 lines" cf os-alpha "$T/cat7"
 
+# --- newest-release.sh ----------------------------------------------------------
+nr() { bash "$root/scripts/newest-release.sh" "$@"; }
+reset_stub
+publish os-alpha-1.0 2026-01-01T00:00:00Z
+publish os-alpha-1.1 2026-01-03T00:00:00Z
+publish os-alpha-extra-2.0 2026-01-04T00:00:00Z
+expect_eq "newest release" "$(nr os-alpha)" "os-alpha-1.1"
+expect_eq "no release" "$(nr os-gamma)" ""
+expect_eq "a release without a series line counts as 26.7" "$(nr os-alpha 26.7)" "os-alpha-1.1"
+publish os-alpha-1.1_1 2026-01-05T00:00:00Z
+printf 'Built from here.\n\nseries: 27.1\n\nsha256: %s\n' "$(sum "$STUB/assets/os-alpha-1.1_1/os-alpha-1.1_1.pkg")" >"$STUB/notes/os-alpha-1.1_1"
+expect_eq "newest for 27.1" "$(nr os-alpha 27.1)" "os-alpha-1.1_1"
+expect_eq "newest for 26.7 skips the 27.1 build" "$(nr os-alpha 26.7)" "os-alpha-1.1"
+expect_eq "newest of any series" "$(nr os-alpha)" "os-alpha-1.1_1"
+expect_eq "no release for a series" "$(nr os-alpha-extra 27.1)" ""
+expect_eq "from RELEASES_JSON" "$(RELEASES_JSON='[{"tagName":"os-alpha-9.0","publishedAt":"2026-02-01T00:00:00Z"}]' nr os-alpha)" "os-alpha-9.0"
+touch "$STUB/fail_list"
+expect_fail "release list unreadable" nr os-alpha
+rm "$STUB/fail_list"
+
 # --- build-package.sh and sign-catalogue.sh (VM scripts, stub git/make/pkg) --
 # a throwaway signing key (the stub pkg signs with the real openssl), and a second
 # one the published public key does not match
