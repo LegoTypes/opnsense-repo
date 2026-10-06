@@ -470,5 +470,36 @@ rm "$STUB/fail_issues"
 echo '[{"number":7,"title":"canary: os-alpha"},{"number":9,"title":"canary: os-alpha"}]' >"$STUB/issues.json"
 expect_fail "report: two open issues with one title" crep
 
+# --- canary-vm.sh and canary.sh --------------------------------------------------
+conf 'os-alpha  Org/plugins br net/alpha yes' \
+	'os-beta   Org/plugins br net/beta  yes'
+vmdir
+vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_FAIL_DIR=net/beta -- canary-vm.sh >/dev/null
+expect_eq "canary-vm: both builds of a good package" "$(names "$W/canary/os-alpha")" "fresh.pkg fresh.source rebased.pkg "
+expect_eq "canary-vm: a failing package does not stop the rest" "$(names "$W/canary/os-beta")" "fresh.tail rebased.tail "
+
+cw="$T/cw"
+rm -rf "$cw"
+mkdir -p "$cw"
+cp -R "$W/canary" "$cw/"
+printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=26.7\n' >"$T/repo.conf"
+printf 'NEWEST=26.7\nNEXT_ABI=\nSERIES=26.7\nCORE=26.7.5\nPHP=85\nPYTHON=313\nFREEBSD=15.1\n' >"$cw/upstream.env"
+reset_stub
+canary_run() { (cd "$cw" && PACKAGES_CONF="$T/packages.conf" REPO_CONF="$T/repo.conf" bash "$root/scripts/canary.sh" https://run/2); }
+out=$(canary_run)
+rc=$?
+expect_eq "canary: a failed build makes the run fail" "$rc" "1"
+expect_eq "canary: one report per package, then the series" "$out" $'clean\nopened\nclean'
+expect_eq "canary: the failing package's issue" "$(cut -s -d'|' -f1,2 "$STUB/issue_calls")" "create|canary: os-beta"
+printf 'NEWEST=27.1\nNEXT_ABI=FreeBSD:16:amd64\nSERIES=26.7\nCORE=26.7.9\nPHP=85\nPYTHON=313\nFREEBSD=15.1\n' >"$cw/upstream.env"
+: >"$STUB/issue_calls"
+canary_run >/dev/null
+expect_eq "canary: a new series and a new FreeBSD major open the series issue" \
+	"$(grep -c '^create|canary: upstream series|' "$STUB/issue_calls")" "1"
+expect_eq "canary: the series issue names both" \
+	"$(grep -c -e 'ships series 27.1' -e 'publishes FreeBSD:16:amd64' "$STUB/issue_calls")" "2"
+rm "$cw/upstream.env"
+expect_fail "canary: refuses to run without upstream facts" canary_run
+
 echo "passed $pass, failed $failed"
 [[ $failed -eq 0 ]]

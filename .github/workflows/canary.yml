@@ -1,0 +1,57 @@
+name: canary
+
+# Every Monday, and on demand: build every catalogue package as a publish would
+# now and with opnsense/plugins master's Mk/, compare both with what is
+# published, and keep one issue per package (label "canary") in step, plus one
+# for the upstream series. It never signs, deploys or releases, so it names no
+# environment, reads no secret and needs no approval. A material finding fails
+# the run, and GitHub mails the owner.
+on:
+  schedule:
+    - cron: "0 14 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: canary
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Upstream facts
+        run: |
+          bash scripts/upstream.sh > upstream.env
+          cat upstream.env
+          sed -n 's/^\(PHP\|PYTHON\)=/UPSTREAM_\1=/p' upstream.env >> "$GITHUB_ENV"
+
+      - name: Build in FreeBSD 15
+        uses: vmactions/freebsd-vm@a2f9a41fa97f6848b8c3b791087dfcdaa5b473ff # v1.5.8
+        with:
+          release: "15"
+          usesh: true
+          envs: UPSTREAM_PHP UPSTREAM_PYTHON
+          prepare: pkg install -y git
+          run: sh scripts/canary-vm.sh
+
+      - name: Compare and report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create canary --color FBCA04 --description "Weekly canary findings" --force
+          bash scripts/canary.sh "$RUN_URL"
