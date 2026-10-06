@@ -3,9 +3,10 @@
 # The material differences between two builds of one package, one per line; exit 0
 # when there are none, 1 when there are some, 2 on an error. Material: abi, arch,
 # product_abi, the FreeBSD major, dependency names, options, install and deinstall
-# scripts, and each file's path, mode and sha256. Not material: the commit hash,
-# timestamps, flatsize, dependency versions and the FreeBSD minor (a 15.0 build
-# installs on 15.1).
+# scripts, and each file's path, mode and sha256. Not material: the commit hash
+# (in the annotations, and in the plugin's /usr/local/opnsense/version file, which
+# repeats it), timestamps, flatsize, dependency versions and the FreeBSD minor (a
+# 15.0 build installs on 15.1).
 set -uo pipefail
 
 die() {
@@ -44,6 +45,20 @@ out=$(jq -rn --argjson a "$a" --argjson b "$b" '
 		  else "file \($f): content changed" end)
 ') || die "cannot compare the manifests"
 
-[[ -z $out ]] && exit 0
-printf '%s\n' "$out"
+# a version file whose only change is product_hash, the commit it was built from, is not material
+vfile() { tar -xOPf "$1" "$2" 2>/dev/null || tar -xOf "$1" "${2#/}" 2>/dev/null; }
+kept=''
+while IFS= read -r line; do
+	[[ -n $line ]] || continue
+	if [[ $line =~ ^file\ (/usr/local/opnsense/version/[^:]+):\ content\ changed$ ]]; then
+		f=${BASH_REMATCH[1]}
+		va=$(vfile "$1" "$f" | jq -S 'del(.product_hash)' 2>/dev/null) || va=''
+		vb=$(vfile "$2" "$f" | jq -S 'del(.product_hash)' 2>/dev/null) || vb=''
+		if [[ -n $va && $va == "$vb" ]]; then continue; fi
+	fi
+	kept+="$line"$'\n'
+done <<<"$out"
+
+[[ -z $kept ]] && exit 0
+printf '%s' "$kept"
 exit 1
