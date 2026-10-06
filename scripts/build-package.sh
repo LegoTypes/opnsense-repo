@@ -2,7 +2,10 @@
 # Build one packages.conf package in the FreeBSD VM. Leaves exactly one
 # out/<name>-<version>.pkg and out/source, one line saying where it came from.
 #   build-package.sh <package>
-# For the "." row (this repository), GITHUB_REPOSITORY and GITHUB_SHA name the
+# For the "." row (this repository), its source line names the last commit that
+# changed the package's directory (so a later commit elsewhere in this repository
+# is not an unreleased change of the package; needs the full history), and the
+# workflow run's commit beside it. GITHUB_REPOSITORY and GITHUB_SHA name the
 # commit being built.
 set -eu
 
@@ -38,7 +41,9 @@ if [ "$repo" = . ]; then
 	git clone --quiet --depth 1 --branch master https://github.com/LegoTypes/plugins.git "$work/tree"
 	mkdir -p "$work/tree/$(dirname "$dir")"
 	cp -R "$dir" "$work/tree/$dir"
-	source="Built from $GITHUB_REPOSITORY, $dir, commit $GITHUB_SHA, in LegoTypes/plugins master $(git -C "$work/tree" rev-parse HEAD)."
+	changed=$(git log -1 --format=%H -- "$dir")
+	[ -n "$changed" ] || die "cannot find the last commit that changed $dir (a shallow checkout? check out with fetch-depth: 0)"
+	source="Built from $GITHUB_REPOSITORY, $dir, commit $changed (workflow run at $GITHUB_SHA), in LegoTypes/plugins master $(git -C "$work/tree" rev-parse HEAD)."
 else
 	git clone --quiet --depth 1 --branch "$branch" "https://github.com/$repo.git" "$work/tree"
 	source="Built from $repo, branch $branch, commit $(git -C "$work/tree" rev-parse HEAD)."

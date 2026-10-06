@@ -39,11 +39,15 @@ if [[ ! -f $d/published.pkg ]]; then
 fi
 
 as=''
+as_ok=no
 if [[ -f $d/fresh.pkg ]]; then
 	rc=0
 	as=$(bash "$here/compare-package.sh" "$d/published.pkg" "$d/fresh.pkg") || rc=$?
 	if ((rc > 1)); then
 		say MATERIAL "the build as a publish would make it could not be compared with the release"
+		as=''
+	else
+		as_ok=yes
 	fi
 	while IFS= read -r l; do
 		[[ -z $l ]] || say MATERIAL "a publish now would change $l"
@@ -56,8 +60,14 @@ if [[ -f $d/rebased.pkg ]]; then
 	if ((rc > 1)); then
 		say MATERIAL "the build with upstream Mk/ could not be compared with the release"
 	fi
+	# a rebased difference is Mk/'s doing only when the as-published build was compared and lacks it
 	while IFS= read -r l; do
-		[[ -z $l ]] || grep -qxF -- "$l" <<<"$as" || say MATERIAL "upstream Mk/ would change $l"
+		[[ -n $l ]] || continue
+		if [[ $as_ok == yes ]]; then
+			grep -qxF -- "$l" <<<"$as" || say MATERIAL "upstream Mk/ would change $l"
+		else
+			say MATERIAL "a build with upstream Mk/ differs from the release in $l (the as-published build could not be compared)"
+		fi
 	done <<<"$rb"
 fi
 
