@@ -64,6 +64,6 @@ case $name in
 esac
 cp "$1" out/
 printf '%s\n' "$source" >out/source
-printf 'series: %s\nfreebsd: %s\nphp: %s\npython: %s\n' "$series" "$(freebsd-version -u)" \
+printf 'abi: %s\nseries: %s\nfreebsd: %s\nphp: %s\npython: %s\n' "$(sh scripts/repo.sh abi)" "$series" "$(freebsd-version -u)" \
 	"$UPSTREAM_PHP" "$UPSTREAM_PYTHON" >out/build
 echo "built $name. $source"

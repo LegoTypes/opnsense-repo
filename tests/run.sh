@@ -44,20 +44,27 @@ expect_eq "real file: catalogue" "$(sh "$root/scripts/packages.sh" catalogue | t
 # --- repo.sh -----------------------------------------------------------------
 rc() { printf '%s\n' "$@" >"$T/repo.conf"; }
 rp() { REPO_CONF="$T/repo.conf" sh "$root/scripts/repo.sh" "$@"; }
-rc '# served repository' 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=26.7 27.1'
+rc '# served repository' 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7 FreeBSD:15:amd64/27.1'
 expect_eq "repo abi" "$(rp abi)" "FreeBSD:15:amd64"
 expect_eq "repo series" "$(rp series)" "26.7"
-expect_eq "repo serve" "$(rp serve | tr '\n' ' ')" "26.7 27.1 "
+expect_eq "repo target" "$(rp target)" "FreeBSD:15:amd64/26.7"
+expect_eq "repo serve" "$(rp serve | tr '\n' ' ')" "FreeBSD:15:amd64/26.7 FreeBSD:15:amd64/27.1 "
 expect_eq "repo tree" "$(rp tree)" "site/FreeBSD:15:amd64/26.7/latest"
-expect_eq "repo tree of a served series" "$(rp tree 27.1)" "site/FreeBSD:15:amd64/27.1/latest"
-expect_fail "repo tree of a series not served" rp tree 25.1
-rc 'ABI=FreeBSD:15:amd64' 'SERIES=27.1' 'SERVE=26.7'
-expect_fail "SERVE must include SERIES" rp serve
-rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERIES=27.1' 'SERVE=26.7'
+expect_eq "repo tree of a served entry" "$(rp tree FreeBSD:15:amd64/27.1)" "site/FreeBSD:15:amd64/27.1/latest"
+expect_fail "repo tree of an entry not served" rp tree FreeBSD:15:amd64/25.1
+rc 'ABI=FreeBSD:16:amd64' 'SERIES=27.7' 'SERVE=FreeBSD:15:amd64/26.7 FreeBSD:16:amd64/27.7'
+expect_eq "an ABI change keeps the old tree where firewalls on the old ABI look for it" \
+	"$(rp tree FreeBSD:15:amd64/26.7)" "site/FreeBSD:15:amd64/26.7/latest"
+expect_eq "an ABI change builds the new tree under the new ABI" "$(rp tree)" "site/FreeBSD:16:amd64/27.7/latest"
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=27.1' 'SERVE=FreeBSD:15:amd64/26.7'
+expect_fail "SERVE must include the target" rp serve
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=26.7'
+expect_fail "a SERVE entry without its ABI" rp serve
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERIES=27.1' 'SERVE=FreeBSD:15:amd64/26.7'
 expect_fail "SERIES set twice" rp series
-rc 'ABI=freebsd15' 'SERIES=26.7' 'SERVE=26.7'
+rc 'ABI=freebsd15' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 expect_fail "malformed ABI" rp abi
-rc 'ABI=FreeBSD:15:amd64' 'SERIES=26' 'SERVE=26'
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26' 'SERVE=FreeBSD:15:amd64/26'
 expect_fail "malformed series" rp series
 expect_eq "real file: tree" "$(sh "$root/scripts/repo.sh" tree)" "site/FreeBSD:15:amd64/26.7/latest"
 choices=$(awk '/^ *options:/ { o = 1; next } o && /^ *- / { print $2; next } o { exit }' \
@@ -105,6 +112,8 @@ names() { (cd "$1" && printf '%s ' *); }
 # cf <built>: carry-forward in $T/cfw with $T/packages.conf and $T/repo.conf; trees land under $T/cfw/site
 cf() { (rm -rf "$T/cfw" && mkdir -p "$T/cfw" && cd "$T/cfw" && PACKAGES_CONF="$T/packages.conf" REPO_CONF="$T/repo.conf" bash "$root/scripts/carry-forward.sh" "$@"); }
 tree() { echo "$T/cfw/site/FreeBSD:15:amd64/${1:-26.7}/latest/All"; }
+# cfok <built>: carry-forward that must succeed
+cfok() { cf "$@" >/dev/null || bad "carry-forward $* exited non-zero"; }
 
 reset_stub
 mkdir -p "$T/out"
@@ -134,7 +143,7 @@ expect_fail "create existing" rel create "$T/out/os-alpha-1.0.pkg" "src"
 expect_fail "create empty source" rel create "$T/out/os-alpha-1.1.pkg" ""
 expect_fail "create two-line source" rel create "$T/out/os-alpha-1.1.pkg" $'a\nb'
 
-rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=26.7'
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 conf 'os-alpha        Org/plugins br   net/alpha yes' \
 	'os-alpha-extra  Org/plugins br   net/extra yes' \
 	'os-beta         Org/plugins br   net/beta  no' \
@@ -146,11 +155,11 @@ publish os-alpha-extra-2.0 2026-01-04T00:00:00Z
 publish os-beta-9.0 2026-01-05T00:00:00Z
 publish os-vendor-1.0_1 2026-01-02T00:00:00Z
 live os-alpha-1.1 os-alpha-extra-2.0 os-vendor-1.0_1
-cf os-vendor >/dev/null
+cfok os-vendor
 expect_eq "carries the newest of each other catalogue package, never a release-only one" \
 	"$(names "$(tree)")" "os-alpha-1.1.pkg os-alpha-extra-2.0.pkg "
 expect_eq "carries the bytes" "$(cat "$(tree)/os-alpha-1.1.pkg")" "bytes of os-alpha-1.1"
-cf os-alpha >/dev/null
+cfok os-alpha
 expect_eq "a name prefix does not capture another package's releases" \
 	"$(names "$(tree)")" "os-alpha-extra-2.0.pkg os-vendor-1.0_1.pkg "
 expect_fail "built package not in the catalogue" cf os-beta
@@ -172,22 +181,23 @@ reset_stub
 publish os-alpha-extra-2.0 2026-01-02T00:00:00Z
 publish os-vendor-1.0 2026-01-02T00:00:00Z
 live os-alpha-extra-2.0 os-vendor-1.0
-cf os-alpha >/dev/null
+cfok os-alpha
 expect_eq "a new package, not yet live or released, can be published" "$(names "$(tree)")" "os-alpha-extra-2.0.pkg os-vendor-1.0.pkg "
 reset_stub
 publish os-alpha-1.0 2026-01-01T00:00:00Z
 publish os-alpha-extra-2.0 2026-01-02T00:00:00Z
 publish os-vendor-1.0 2026-01-02T00:00:00Z
 live os-alpha-1.0 os-alpha-extra-2.0 os-vendor-1.0
-cf os-alpha >/dev/null
+cfok os-alpha
 expect_eq "consistent live catalogue and releases carry forward" "$(names "$(tree)")" "os-alpha-extra-2.0.pkg os-vendor-1.0.pkg "
 reset_stub
 publish os-alpha-1.0 2026-01-01T00:00:00Z "" 2026-01-01T00:00:00Z
 publish os-alpha-1.1 2026-01-02T00:00:00Z "" 2026-01-01T00:00:00Z
+publish os-alpha-extra-2.0 2026-01-02T00:00:00Z
 publish os-vendor-1.0 2026-01-02T00:00:00Z
-live os-alpha-1.1 os-vendor-1.0
-cf os-vendor >/dev/null
-expect_eq "two releases tagged on one commit: the later published is the newest" "$(names "$(tree)")" "os-alpha-1.1.pkg "
+live os-alpha-1.1 os-alpha-extra-2.0 os-vendor-1.0
+cfok os-vendor
+expect_eq "two releases tagged on one commit: the later published is the newest" "$(names "$(tree)")" "os-alpha-1.1.pkg os-alpha-extra-2.0.pkg "
 reset_stub
 publish os-alpha-1.0 2026-01-01T00:00:00Z
 publish os-alpha-extra-2.0 2026-01-02T00:00:00Z
@@ -199,7 +209,7 @@ printf 'sha256: %s\nsha256: %s\n' "$(sum "$STUB/assets/os-vendor-1.0/os-vendor-1
 expect_fail "notes with two sha256 lines" cf os-alpha
 
 # two served series: 27.1 is the target, 26.7 stays frozen at its last releases
-rc 'ABI=FreeBSD:15:amd64' 'SERIES=27.1' 'SERVE=26.7 27.1'
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=27.1' 'SERVE=FreeBSD:15:amd64/26.7 FreeBSD:15:amd64/27.1'
 reset_stub
 rm -rf "$T/livesite"
 publish os-alpha-1.1 2026-01-03T00:00:00Z
@@ -208,12 +218,24 @@ publish os-alpha-1.1_1 2026-02-01T00:00:00Z
 printf 'Built.\n\nseries: 27.1\n\nsha256: %s\n' "$(sum "$STUB/assets/os-alpha-1.1_1/os-alpha-1.1_1.pkg")" >"$STUB/notes/os-alpha-1.1_1"
 live -s 26.7 os-alpha-1.1 os-vendor-1.0
 live -s 27.1 os-alpha-1.1_1
-cf os-vendor >/dev/null
+cfok os-vendor
 expect_eq "series: the target tree carries the 27.1 builds" "$(names "$(tree 27.1)")" "os-alpha-1.1_1.pkg "
 expect_eq "series: the frozen tree carries its own releases, the built package's included" "$(names "$(tree 26.7)")" "os-alpha-1.1.pkg os-vendor-1.0.pkg "
 live -s 26.7 os-alpha-1.0 os-vendor-1.0
 expect_fail "series: a frozen tree serving other than its newest releases" cf os-vendor
-rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=26.7'
+live -s 26.7 os-alpha-1.1 os-vendor-1.0
+rm -rf "$T/livesite/FreeBSD:15:amd64/27.1"
+reset_stub
+publish os-alpha-1.1 2026-01-03T00:00:00Z
+publish os-alpha-extra-2.0 2026-01-04T00:00:00Z
+publish os-vendor-1.0 2026-01-02T00:00:00Z
+live -s 26.7 os-alpha-1.1 os-alpha-extra-2.0 os-vendor-1.0
+cfok os-vendor
+expect_eq "series: the first publish into a new series succeeds with nothing else released for it" \
+	"$(names "$(tree 27.1)" 2>/dev/null)" "* "
+expect_eq "series: the first publish keeps the old series whole" "$(names "$(tree 26.7)")" \
+	"os-alpha-1.1.pkg os-alpha-extra-2.0.pkg os-vendor-1.0.pkg "
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 
 # --- newest-release.sh ----------------------------------------------------------
 nr() { bash "$root/scripts/newest-release.sh" "$@"; }
@@ -223,13 +245,17 @@ publish os-alpha-1.1 2026-01-03T00:00:00Z
 publish os-alpha-extra-2.0 2026-01-04T00:00:00Z
 expect_eq "newest release" "$(nr os-alpha)" "os-alpha-1.1"
 expect_eq "no release" "$(nr os-gamma)" ""
-expect_eq "a release without a series line counts as 26.7" "$(nr os-alpha 26.7)" "os-alpha-1.1"
+expect_eq "a release without a series line counts as 26.7" "$(nr os-alpha FreeBSD:15:amd64/26.7)" "os-alpha-1.1"
 publish os-alpha-1.1_1 2026-01-05T00:00:00Z
 printf 'Built from here.\n\nseries: 27.1\n\nsha256: %s\n' "$(sum "$STUB/assets/os-alpha-1.1_1/os-alpha-1.1_1.pkg")" >"$STUB/notes/os-alpha-1.1_1"
-expect_eq "newest for 27.1" "$(nr os-alpha 27.1)" "os-alpha-1.1_1"
-expect_eq "newest for 26.7 skips the 27.1 build" "$(nr os-alpha 26.7)" "os-alpha-1.1"
+expect_eq "newest for 27.1" "$(nr os-alpha FreeBSD:15:amd64/27.1)" "os-alpha-1.1_1"
+expect_eq "newest for 26.7 skips the 27.1 build" "$(nr os-alpha FreeBSD:15:amd64/26.7)" "os-alpha-1.1"
 expect_eq "newest of any series" "$(nr os-alpha)" "os-alpha-1.1_1"
-expect_eq "no release for a series" "$(nr os-alpha-extra 27.1)" ""
+expect_eq "no release for a series" "$(nr os-alpha-extra FreeBSD:15:amd64/27.1)" ""
+publish os-alpha-1.1_2 2026-01-06T00:00:00Z
+printf 'Built.\n\nabi: FreeBSD:16:amd64\nseries: 27.1\n\nsha256: %s\n' "$(sum "$STUB/assets/os-alpha-1.1_2/os-alpha-1.1_2.pkg")" >"$STUB/notes/os-alpha-1.1_2"
+expect_eq "the ABI counts too: a FreeBSD 16 build is not the FreeBSD 15 27.1 build" "$(nr os-alpha FreeBSD:15:amd64/27.1)" "os-alpha-1.1_1"
+expect_eq "newest for the FreeBSD 16 entry" "$(nr os-alpha FreeBSD:16:amd64/27.1)" "os-alpha-1.1_2"
 expect_eq "from RELEASES_JSON" "$(RELEASES_JSON='[{"tagName":"os-alpha-9.0","publishedAt":"2026-02-01T00:00:00Z"}]' nr os-alpha)" "os-alpha-9.0"
 touch "$STUB/fail_list"
 expect_fail "release list unreadable" nr os-alpha
@@ -248,7 +274,7 @@ vmdir() {
 	mkdir -p "$W/keys" "$W/vendor/v"
 	cp -R "$root/scripts" "$W/"
 	cp "$T/packages.conf" "$W/packages.conf"
-	printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=26.7\n' >"$W/repo.conf"
+	printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=FreeBSD:15:amd64/26.7\n' >"$W/repo.conf"
 	cp "$T/pub.pem" "$W/keys/legotypes-pkg-signing.pub"
 	trust "$T/pub.pem"
 }
@@ -281,7 +307,7 @@ vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-1.1.pkg -- build-pa
 expect_eq "build: one package in out/" "$(names "$W/out")" "build os-alpha-1.1.pkg source "
 expect_eq "build: source line" "$(cat "$W/out/source")" "Built from Org/plugins, branch br-alpha, commit $commit."
 expect_eq "build: the build environment" "$(cat "$W/out/build")" \
-	$'series: 26.7\nfreebsd: 15.1-RELEASE-p3\nphp: 85\npython: 313'
+	$'abi: FreeBSD:15:amd64\nseries: 26.7\nfreebsd: 15.1-RELEASE-p3\nphp: 85\npython: 313'
 expect_fail "build: no upstream PHP" vmenv UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha
 vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-1.1.pkg MK_FROM=upstream -- build-package.sh os-alpha >/dev/null
 expect_eq "build: with upstream Mk/" "$(cat "$W/out/source")" \
@@ -346,12 +372,25 @@ trust "$T/other.pub"
 expect_fail "sign: a key os-legotypes does not trust (a half-done rotation)" vm sign-catalogue.sh
 expect_eq "sign: nothing published for an untrusted key" "$([[ -e $W/site/os-legotypes.pkg ]] && echo yes || echo no)" "no"
 signdir os-alpha-1.1.pkg
-printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=26.1 26.7\n' >"$W/repo.conf"
+printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=FreeBSD:15:amd64/26.1 FreeBSD:15:amd64/26.7\n' >"$W/repo.conf"
 mkdir -p "$W/site/FreeBSD:15:amd64/26.1/latest/All"
 echo "old" >"$W/site/FreeBSD:15:amd64/26.1/latest/All/os-alpha-1.0.pkg"
 vm sign-catalogue.sh >/dev/null
 expect_eq "sign: a frozen tree is signed too" "$(cat "$W/site/FreeBSD:15:amd64/26.1/latest/meta.conf" 2>/dev/null)" "version = 2;"
 expect_eq "sign: a frozen tree may lack a package" "$(grep -c '^Name' "$W/site/FreeBSD:15:amd64/26.1/latest/packages.txt" 2>/dev/null)" "1"
+signdir
+printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=FreeBSD:15:amd64/26.1 FreeBSD:15:amd64/26.7\n' >"$W/repo.conf"
+mkdir -p "$W/site/FreeBSD:15:amd64/26.1/latest/All"
+echo "old" >"$W/site/FreeBSD:15:amd64/26.1/latest/All/os-alpha-1.0.pkg"
+expect_eq "sign: the first publish into a new series signs a target tree holding only the built package" \
+	"$(vm sign-catalogue.sh >/dev/null 2>&1; echo "rc=$?")" "rc=0"
+signdir
+expect_fail "sign: with one series served, every catalogue package is still required" vm sign-catalogue.sh
+signdir os-alpha-1.1.pkg
+printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=FreeBSD:15:amd64/26.1 FreeBSD:15:amd64/26.7\n' >"$W/repo.conf"
+mkdir -p "$W/site/FreeBSD:15:amd64/26.1/latest/All"
+echo "old" >"$W/site/FreeBSD:15:amd64/26.1/latest/All/os-alpha-1.0.pkg"
+vm sign-catalogue.sh >/dev/null
 expect_eq "sign: the root keeps the target tree" "$(grep '^Name' "$W/site/packages.txt" | tr '\n' ' ')" \
 	"Name : os-alpha-1.1 Name : os-legotypes-1.0_2 "
 
@@ -387,7 +426,7 @@ core() { # core <version> <FreeBSD_version> <dependency names...>
 		annotations: {FreeBSD_version: $f}, deps: ($ARGS.positional | map({key: ., value: {}}) | from_entries)}' "$@"
 }
 up() { REPO_CONF="$T/repo.conf" bash "$root/scripts/upstream.sh" "$@"; }
-rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=26.7'
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 mirror 26.1 26.7
 site 26.7 "$(core 26.7.5 1501000 php85-curl php85-xml py313-requests pkg)" '{"name":"php85","version":"8.5.10"}'
 expect_eq "upstream facts" "$(up)" $'NEWEST=26.7\nNEXT_ABI=\nSERIES=26.7\nCORE=26.7.5\nPHP=85\nPYTHON=313\nFREEBSD=15.1'
@@ -528,7 +567,7 @@ cw="$T/cw"
 rm -rf "$cw"
 mkdir -p "$cw"
 cp -R "$W/canary" "$cw/"
-printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=26.7\n' >"$T/repo.conf"
+printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=FreeBSD:15:amd64/26.7\n' >"$T/repo.conf"
 printf 'NEWEST=26.7\nNEXT_ABI=\nSERIES=26.7\nCORE=26.7.5\nPHP=85\nPYTHON=313\nFREEBSD=15.1\n' >"$cw/upstream.env"
 reset_stub
 canary_run() { (cd "$cw" && PACKAGES_CONF="$T/packages.conf" REPO_CONF="$T/repo.conf" bash "$root/scripts/canary.sh" https://run/2); }
@@ -548,7 +587,7 @@ rm "$cw/upstream.env"
 expect_fail "canary: refuses to run without upstream facts" canary_run
 
 # --- verify-catalogue.sh -------------------------------------------------------------
-rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=26.7'
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 reset_stub
 rm -rf "$T/livesite"
 publish os-alpha-1.1 2026-01-03T00:00:00Z

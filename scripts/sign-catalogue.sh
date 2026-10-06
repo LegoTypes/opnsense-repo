@@ -1,8 +1,9 @@
 #!/bin/sh
 # In the FreeBSD VM, after build-package.sh and carry-forward.sh: add out/'s
-# package to the target series' tree, check every served tree (repo.sh serve) is
-# exactly its catalogue (the target tree one package per catalogue row, a frozen
-# tree at most one), sign each with .signing/key (removed on exit, whatever
+# package to the target tree, check every served tree (repo.sh serve) is exactly
+# its catalogue (with one tree served, the target holds one package per catalogue
+# row; while two are served, the target and a frozen tree each hold at most one,
+# the target always the built package), sign each with .signing/key (removed on exit, whatever
 # happens), verify both signatures of each against keys/legotypes-pkg-signing.pub,
 # write each tree's packages.txt, and only then write the rest of the Pages site
 # from the target tree: the bootstrap os-legotypes.pkg, the public key and
@@ -11,8 +12,10 @@ set -eu
 
 PUB=keys/legotypes-pkg-signing.pub
 TRUSTED=vendor/legotypes/src/etc/pkg/fingerprints/LegoTypes/trusted
-target=$(sh scripts/repo.sh series)
+target=$(sh scripts/repo.sh target)
 R=$(sh scripts/repo.sh tree)
+served=$(sh scripts/repo.sh serve)
+count=$(printf '%s\n' "$served" | wc -l)
 
 die() {
 	echo "sign-catalogue.sh: $*" >&2
@@ -44,18 +47,19 @@ printf '%s\n' '#!/bin/sh' 'set -e' 'read -t 2 sum' '[ -n "$sum" ]' \
 	'[ -s .signing/sig ]' 'echo SIGNATURE' 'cat .signing/sig' 'echo' \
 	'echo CERT' "cat $PUB" 'echo END' >.signing/sign.sh
 
-for series in $(sh scripts/repo.sh serve); do
-	tree=$(sh scripts/repo.sh tree "$series")
+for entry in $served; do
+	tree=$(sh scripts/repo.sh tree "$entry")
 	mkdir -p "$tree/All"
-	# the target tree holds exactly one package per catalogue row; a frozen tree at
-	# most one (only what was released for it); neither holds anything else
+	# with one tree served the target holds exactly one package per catalogue row;
+	# otherwise each tree holds at most one (only what was released for it); none
+	# holds anything else
 	expected=0
 	for p in $catalogue; do
 		set -- "$tree/All/$p"-[0-9]*.pkg
 		if [ -f "$1" ]; then
 			[ $# -eq 1 ] || die "$p: expected one package in $tree/All, found: $*"
 			expected=$((expected + 1))
-		elif [ "$series" = "$target" ]; then
+		elif [ "$entry" = "$target" ] && [ "$count" -eq 1 ]; then
 			die "$p: expected one package in $tree/All, found none"
 		fi
 	done

@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # carry-forward.sh <built-package>
-# Fill every served series' tree (repo.sh serve, repo.sh tree) with the current
-# release of each catalogue package for that series, byte for byte, except
-# <built> in the target series, which the build adds. "Current" is the newest
-# release for that series (newest-release.sh); its .pkg must match the sha256 its
-# notes record. A frozen series holds only the packages released for it.
+# Fill every served <ABI>/<series> tree (repo.sh serve, repo.sh tree) with the
+# current release of each catalogue package for that tree, byte for byte, except
+# <built> in the target tree, which the build adds. "Current" is the newest
+# release for that tree (newest-release.sh); its .pkg must match the sha256 its
+# notes record. A frozen tree holds only the packages released for it. With one
+# tree served, the target needs every catalogue package; while a series or ABI
+# change serves two, the new target holds what has been released for it so far,
+# so its first publish can succeed.
 # LIVE_SITE is the live site's base URL: each tree's packages.txt there must list
 # exactly each package's newest release for that series, or carrying forward
 # would silently roll a package back.
@@ -24,27 +27,29 @@ built=$1
 
 catalogue=$(sh "$here/packages.sh" catalogue) || die "cannot read the catalogue"
 grep -qxF -- "$built" <<<"$catalogue" || die "$built is not a catalogue package"
-target=$(sh "$here/repo.sh" series)
+target=$(sh "$here/repo.sh" target)
+served=$(sh "$here/repo.sh" serve) || die "cannot read the served trees"
+count=$(wc -l <<<"$served")
 releases=$(gh release list --limit 1000 --json tagName,publishedAt) || die "cannot list releases"
 
-for series in $(sh "$here/repo.sh" serve); do
-	tree=$(sh "$here/repo.sh" tree "$series")
+for entry in $served; do
+	tree=$(sh "$here/repo.sh" tree "$entry")
 	# what that tree serves now (nothing yet for a series being added)
 	live=$(curl -fsSL "$LIVE_SITE/${tree#site/}/packages.txt" 2>/dev/null || true)
 	while read -r pkg <&3; do
-		tag=$(RELEASES_JSON="$releases" bash "$here/newest-release.sh" "$pkg" "$series")
-		served=$(awk -v p="$pkg" '$1 == "Name" && $3 == p { getline; if ($1 == "Version") print $3 }' <<<"$live")
-		[[ -n $tag || -n $served ]] || continue # neither released nor live for this series
-		[[ -n $tag && $served == "${tag#"$pkg"-}" ]] ||
-			die "series $series serves $pkg ${served:-(nothing)} but its newest release for $series is ${tag:-(none)}: re-run the failed jobs of the publish that deployed it; do not publish again"
+		tag=$(RELEASES_JSON="$releases" bash "$here/newest-release.sh" "$pkg" "$entry")
+		live_version=$(awk -v p="$pkg" '$1 == "Name" && $3 == p { getline; if ($1 == "Version") print $3 }' <<<"$live")
+		[[ -n $tag || -n $live_version ]] || continue # neither released nor live for this tree
+		[[ -n $tag && $live_version == "${tag#"$pkg"-}" ]] ||
+			die "$entry serves $pkg ${live_version:-(nothing)} but its newest release for $entry is ${tag:-(none)}: re-run the failed jobs of the publish that deployed it; do not publish again"
 	done 3<<<"$catalogue"
 
 	mkdir -p "$tree/All"
 	while read -r pkg <&3; do
-		[[ $series != "$target" || $pkg != "$built" ]] || continue
-		tag=$(RELEASES_JSON="$releases" bash "$here/newest-release.sh" "$pkg" "$series")
+		[[ $entry != "$target" || $pkg != "$built" ]] || continue
+		tag=$(RELEASES_JSON="$releases" bash "$here/newest-release.sh" "$pkg" "$entry")
 		if [[ -z $tag ]]; then
-			[[ $series != "$target" ]] || die "$pkg has no release for $series to carry forward"
+			[[ $entry != "$target" || $count -gt 1 ]] || die "$pkg has no release for $entry to carry forward"
 			continue
 		fi
 		want=$(gh release view "$tag" --json body --jq .body | tr -d '\r' |
@@ -56,6 +61,6 @@ for series in $(sh "$here/repo.sh" serve); do
 		[[ $got == "$want" ]] || die "$tag.pkg has sha256 $got; its release notes say $want"
 		mv "$tmp/$tag.pkg" "$tree/All/"
 		rmdir "$tmp"
-		echo "carried forward $tag into $series"
+		echo "carried forward $tag into $entry"
 	done 3<<<"$catalogue"
 done
