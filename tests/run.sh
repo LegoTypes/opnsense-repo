@@ -41,7 +41,7 @@ expect_fail "usage" pk
 expect_eq "real file: avahi is release-only" \
 	"$(sh "$root/scripts/packages.sh" row os-avahi-reflector | awk '{print $4}')" "no"
 expect_eq "real file: catalogue" "$(sh "$root/scripts/packages.sh" catalogue | tr '\n' ' ')" \
-	"os-wg-client-tunnels os-mac-alias-cache os-legotypes "
+	"os-wg-client-tunnels os-mac-alias-cache os-wan-failover os-legotypes "
 
 # --- release.sh and carry-forward.sh -----------------------------------------
 export PATH="$root/tests/stub:$PATH" GH_REPO=Org/repo
