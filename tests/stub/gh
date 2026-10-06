@@ -50,6 +50,31 @@ case "$1 $2" in
 	done
 	printf '%s|%s|%s\n%s\n' "$tag" "$(basename "$file")" "$target" "$notes" >>"$STUB/created"
 	;;
+"issue list")
+	[[ ! -e $STUB/fail_issues ]] || {
+		echo "HTTP 502" >&2
+		exit 1
+	}
+	cat "$STUB/issues.json"
+	;;
+"issue create")
+	title='' body=''
+	shift 2
+	while [[ $# -gt 0 ]]; do
+		case $1 in
+		--title) title=$2 && shift 2 ;;
+		--body) body=$2 && shift 2 ;;
+		*) shift ;;
+		esac
+	done
+	printf 'create|%s|%s\n' "$title" "$body" >>"$STUB/issue_calls"
+	;;
+"issue edit")
+	printf 'edit|%s|%s\n' "$3" "$5" >>"$STUB/issue_calls"
+	;;
+"issue close")
+	printf 'close|%s|%s\n' "$3" "$5" >>"$STUB/issue_calls"
+	;;
 "api "*)
 	[[ ! -e $STUB/fail_api ]] || {
 		echo "HTTP 502" >&2

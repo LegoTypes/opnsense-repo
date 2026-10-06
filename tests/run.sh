@@ -75,6 +75,8 @@ reset_stub() {
 	mkdir -p "$STUB/notes" "$STUB/assets"
 	: >"$STUB/tags"
 	echo '[]' >"$STUB/releases.json"
+	echo '[]' >"$STUB/issues.json"
+	: >"$STUB/issue_calls"
 }
 # publish <tag> <published-at> [notes-sha] [created-at]: a release holding <tag>.pkg. As on GitHub,
 # createdAt is the date of the tagged commit (so two releases of one commit share it), publishedAt is
@@ -408,6 +410,65 @@ expect_eq "compare: scripts" "$(cmpk)" $'script post-install: changed\nscript pr
 mkpkg "$T/b.pkg" "$(mod '.files["/usr/local/a"].perm = "0755" | .files["/usr/local/b"].sum = "1$z" | .files["/usr/local/c"] = {"sum":"1$c","perm":"0644"}')"
 expect_eq "compare: files" "$(cmpk)" $'file /usr/local/a: mode 0644 -> 0755\nfile /usr/local/b: content changed\nfile /usr/local/c: added\nrc=1'
 expect_eq "compare: not a package" "$(bash "$root/scripts/compare-package.sh" "$T/repo.conf" "$T/a.pkg" 2>/dev/null; echo "rc=$?")" "rc=2"
+
+# --- canary-findings.sh and canary-report.sh ----------------------------------------
+fd() { bash "$root/scripts/canary-findings.sh" os-alpha "$T/cf"; echo "rc=$?"; }
+cfdir() {
+	rm -rf "$T/cf"
+	mkdir -p "$T/cf"
+	mkpkg "$T/cf/published.pkg" "$base"
+	printf 'Built from Org/plugins, branch b, commit 1111111aaaa.\n\nsha256: x\n' >"$T/cf/notes"
+	mkpkg "$T/cf/fresh.pkg" "$base"
+	mkpkg "$T/cf/rebased.pkg" "$base"
+	echo "Built from Org/plugins, branch b, commit 1111111aaaa." >"$T/cf/fresh.source"
+}
+cfdir
+expect_eq "findings: all the same" "$(fd)" "rc=0"
+mkpkg "$T/cf/rebased.pkg" "$(mod '.scripts["post-install"] = "echo new"')"
+expect_eq "findings: upstream Mk/ changes a script" "$(fd)" \
+	$'MATERIAL: upstream Mk/ would change script post-install: changed\nrc=1'
+cfdir
+mkpkg "$T/cf/fresh.pkg" "$(mod '.annotations.product_abi = "27.1"')"
+mkpkg "$T/cf/rebased.pkg" "$(mod '.annotations.product_abi = "27.1"')"
+expect_eq "findings: a difference both builds show is reported once" "$(fd)" \
+	$'MATERIAL: a publish now would change product_abi: "26.7" -> "27.1"\nrc=1'
+cfdir
+rm "$T/cf/fresh.pkg"
+echo "make: error 1" >"$T/cf/fresh.tail"
+expect_eq "findings: a failed build is material" "$(fd)" \
+	$'MATERIAL: building the branch as a publish would failed: make: error 1\nrc=1'
+cfdir
+echo "Built from Org/plugins, branch b, commit 2222222bbbb." >"$T/cf/fresh.source"
+expect_eq "findings: unreleased commits are a note" "$(fd)" \
+	$'NOTE: the branch has commits after its release (release 1111111aaaa, branch head 2222222bbbb)\nrc=0'
+cfdir
+rm "$T/cf/published.pkg" "$T/cf/notes"
+expect_eq "findings: no release yet is a note" "$(fd)" $'NOTE: os-alpha has no release yet; nothing to compare\nrc=0'
+
+crep() { bash "$root/scripts/canary-report.sh" "canary: os-alpha" "$T/findings" "https://run/1"; }
+reset_stub
+printf 'MATERIAL: x\nNOTE: y\n' >"$T/findings"
+expect_eq "report: opens an issue" "$(crep)" "opened"
+expect_eq "report: the issue" "$(cut -s -d'|' -f1,2 "$STUB/issue_calls")" "create|canary: os-alpha"
+expect_eq "report: the body lists the findings" "$(grep -c '^- \*\*MATERIAL\*\*: x$' "$STUB/issue_calls")" "1"
+echo '[{"number":7,"title":"canary: os-alpha"},{"number":8,"title":"canary: os-beta"}]' >"$STUB/issues.json"
+: >"$STUB/issue_calls"
+expect_eq "report: updates the open one" "$(crep)" "updated"
+expect_eq "report: the edit" "$(cut -s -d'|' -f1,2 "$STUB/issue_calls")" "edit|7"
+printf 'NOTE: y\n' >"$T/findings"
+: >"$STUB/issue_calls"
+expect_eq "report: closes it when clean" "$(crep)" "closed"
+expect_eq "report: the close" "$(cut -s -d'|' -f1,2 "$STUB/issue_calls")" "close|7"
+echo '[]' >"$STUB/issues.json"
+expect_eq "report: clean, nothing open" "$(crep)" "clean"
+printf 'MATERIAL: x\n' >"$T/findings"
+touch "$STUB/fail_issues"
+: >"$STUB/issue_calls"
+expect_fail "report: the issue list unreadable" crep
+expect_eq "report: no duplicate opened when the list fails" "$(cat "$STUB/issue_calls")" ""
+rm "$STUB/fail_issues"
+echo '[{"number":7,"title":"canary: os-alpha"},{"number":9,"title":"canary: os-alpha"}]' >"$STUB/issues.json"
+expect_fail "report: two open issues with one title" crep
 
 echo "passed $pass, failed $failed"
 [[ $failed -eq 0 ]]
