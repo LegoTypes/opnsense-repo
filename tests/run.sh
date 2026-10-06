@@ -547,5 +547,24 @@ expect_eq "canary: the series issue names both" \
 rm "$cw/upstream.env"
 expect_fail "canary: refuses to run without upstream facts" canary_run
 
+# --- verify-catalogue.sh -------------------------------------------------------------
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=26.7'
+reset_stub
+rm -rf "$T/livesite"
+publish os-alpha-1.1 2026-01-03T00:00:00Z
+live os-alpha-1.1
+d="$T/livesite/FreeBSD:15:amd64/26.7/latest"
+echo "catalogue data" >"$T/data"
+openssl dgst -sha256 -r "$T/data" | cut -d' ' -f1 | tr -d '\n' | openssl dgst -sha256 -sign "$T/key.pem" -binary >"$T/data.sig"
+tar -cf "$d/data.pkg" -C "$T" data data.sig
+vc() { REPO_CONF="$T/repo.conf" PUB_KEY="$T/pub.pem" bash "$root/scripts/verify-catalogue.sh" "$@"; }
+expect_eq "verify: a good publish" "$(vc os-alpha >/dev/null; echo "rc=$?")" "rc=0"
+live os-alpha-1.0
+expect_fail "verify: the tree serves an older build" vc os-alpha
+live os-alpha-1.1
+openssl dgst -sha256 -r "$T/data" | cut -d' ' -f1 | tr -d '\n' | openssl dgst -sha256 -sign "$T/other.pem" -binary >"$T/data.sig"
+tar -cf "$d/data.pkg" -C "$T" data data.sig
+expect_fail "verify: a signature the published key does not verify" vc os-alpha
+
 echo "passed $pass, failed $failed"
 [[ $failed -eq 0 ]]
