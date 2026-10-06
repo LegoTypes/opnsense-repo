@@ -14,12 +14,11 @@ The plugins, what they do and how to install them: <https://legotypes.github.io>
 | `os-mac-alias-cache` | `LegoTypes/plugins`, branch `add-mac-alias-cache` | catalogue, `publish` |
 | `os-wan-failover` | `LegoTypes/plugins`, branch `add-wan-failover` | catalogue, `publish` (not on the site) |
 | `os-legotypes` | this repository, `vendor/legotypes` on `main` | catalogue, `publish` |
-| `os-avahi-reflector` | `LegoTypes/plugins`, branch `add-avahi-reflector` | release only, `avahi` (being retired in favour of net/netflector; not offered to firewalls) |
 
 1. Commit the change on its branch with a `PLUGIN_VERSION` or `PLUGIN_REVISION` bump and push it. A run whose version already has a release fails before anything is published: pkg would not see an unchanged version as an update.
-2. Start the workflow: `gh workflow run publish -R LegoTypes/opnsense-repo -f package=<package>` (or `gh workflow run avahi -R LegoTypes/opnsense-repo`).
+2. Start the workflow: `gh workflow run publish -R LegoTypes/opnsense-repo -f package=<package>`.
 3. Approve the `release` environment when the run waits; it holds the signing key.
-4. `publish` builds the package in FreeBSD 15, adds the other catalogue packages from their releases (each checked against the sha256 in its release notes), signs the catalogue, deploys it to Pages and, only then, records the build as the release `<package>-<version>`. `avahi` builds and records the release only.
+4. `publish` builds the package in FreeBSD 15, adds the other catalogue packages from their releases (each checked against the sha256 in its release notes), signs the catalogue, deploys it to Pages and, only then, records the build as the release `<package>-<version>`.
 5. Firewalls update from System > Firmware > Plugins, or with `pkg upgrade`.
 
 **If a run fails after its deploy** (the catalogue went live but the `release` job did not create the release): use **Re-run failed jobs** on that run; its artifact still holds the deployed build. Never start a new publish for it: that would rebuild from the branch head under the same version. Until the release exists, every publish fails at carry-forward, which checks that the live catalogue serves exactly each package's newest release, so nothing is silently rolled back.
