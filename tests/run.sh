@@ -360,5 +360,34 @@ rm -rf "$STUB_MIRROR"
 expect_fail "mirror unreachable" up
 unset STUB_MIRROR STUB_MIRROR_URL UPSTREAM_MIRROR
 
+# --- compare-package.sh -------------------------------------------------------
+mkpkg() { # mkpkg <file> <+MANIFEST json>: a package holding only its manifest, as compare reads it
+	local d
+	d=$(mktemp -d)
+	printf '%s' "$2" >"$d/+MANIFEST"
+	tar -cf "$1" -C "$d" +MANIFEST
+	rm -rf "$d"
+}
+base='{"name":"os-alpha","abi":"FreeBSD:15:amd64","arch":"freebsd:15:x86:64","flatsize":10,
+ "annotations":{"product_abi":"26.7","FreeBSD_version":"1500068","product_hash":"aaaaaaa"},
+ "scripts":{"post-install":"echo hi"},
+ "files":{"/usr/local/a":{"sum":"1$x","perm":"0644","mtime":1},"/usr/local/b":{"sum":"1$y","perm":"0755","mtime":1}}}'
+mod() { jq -c "$1" <<<"$base"; }
+cmpk() { bash "$root/scripts/compare-package.sh" "$T/a.pkg" "$T/b.pkg"; echo "rc=$?"; }
+mkpkg "$T/a.pkg" "$base"
+mkpkg "$T/b.pkg" "$(mod '.annotations.product_hash = "bbbbbbb" | .annotations.FreeBSD_version = "1501000" | .flatsize = 99 | .files["/usr/local/a"].mtime = 9')"
+expect_eq "compare: commit, FreeBSD minor, flatsize and mtimes are not material" "$(cmpk)" "rc=0"
+mkpkg "$T/b.pkg" "$(mod '.annotations.product_abi = "27.1"')"
+expect_eq "compare: series" "$(cmpk)" $'product_abi: "26.7" -> "27.1"\nrc=1'
+mkpkg "$T/b.pkg" "$(mod '.annotations.FreeBSD_version = "1600010" | .abi = "FreeBSD:16:amd64"')"
+expect_eq "compare: FreeBSD major and ABI" "$(cmpk)" $'abi: "FreeBSD:15:amd64" -> "FreeBSD:16:amd64"\nfreebsd_major: 15 -> 16\nrc=1'
+mkpkg "$T/b.pkg" "$(mod '.deps = {"php86":{"origin":"lang/php86","version":"8.6.0"}}')"
+expect_eq "compare: a dependency appears" "$(cmpk)" $'deps: [] -> ["php86"]\nrc=1'
+mkpkg "$T/b.pkg" "$(mod '.scripts["post-install"] = "echo bye" | .scripts["pre-deinstall"] = "x"')"
+expect_eq "compare: scripts" "$(cmpk)" $'script post-install: changed\nscript pre-deinstall: added\nrc=1'
+mkpkg "$T/b.pkg" "$(mod '.files["/usr/local/a"].perm = "0755" | .files["/usr/local/b"].sum = "1$z" | .files["/usr/local/c"] = {"sum":"1$c","perm":"0644"}')"
+expect_eq "compare: files" "$(cmpk)" $'file /usr/local/a: mode 0644 -> 0755\nfile /usr/local/b: content changed\nfile /usr/local/c: added\nrc=1'
+expect_eq "compare: not a package" "$(bash "$root/scripts/compare-package.sh" "$T/repo.conf" "$T/a.pkg" 2>/dev/null; echo "rc=$?")" "rc=2"
+
 echo "passed $pass, failed $failed"
 [[ $failed -eq 0 ]]
