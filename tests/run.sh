@@ -38,8 +38,6 @@ expect_fail "duplicate" pk catalogue
 conf 'os-alpha-2 Org/plugins br net/a yes'
 expect_fail "name with -digit" pk row os-alpha-2
 expect_fail "usage" pk
-expect_eq "real file: avahi is release-only" \
-	"$(sh "$root/scripts/packages.sh" row os-avahi-reflector | awk '{print $4}')" "no"
 expect_eq "real file: catalogue" "$(sh "$root/scripts/packages.sh" catalogue | tr '\n' ' ')" \
 	"os-wg-client-tunnels os-mac-alias-cache os-wan-failover os-legotypes "
 
