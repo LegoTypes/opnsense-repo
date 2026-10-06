@@ -9,4 +9,14 @@ https://legotypes.github.io/
 Uninstalling this package removes the repository again; plugins already
 installed from it stay installed until removed.
 
+Plugin Changelog
+================
+
+1.1
+
+* configctl legotypes check: do the LegoTypes packages fit this firewall
+  (series, package ABI, repository config), with updates available and
+  hand-installed packages listed; Monit runs it as legotypes_runtime
+* The repository follows the series the firewall runs (set at every boot)
+
 WWW: https://legotypes.github.io/install/
