@@ -12,6 +12,7 @@ The plugins, what they do and how to install them: <https://legotypes.github.io>
 | --- | --- | --- |
 | `os-wg-client-tunnels` | `LegoTypes/plugins`, branch `add-wg-ipv6-gateway` | catalogue, `publish` |
 | `os-mac-alias-cache` | `LegoTypes/plugins`, branch `add-mac-alias-cache` | catalogue, `publish` |
+| `os-wan-failover` | `LegoTypes/plugins`, branch `add-wan-failover` | catalogue, `publish` (not on the site) |
 | `os-legotypes` | this repository, `vendor/legotypes` on `main` | catalogue, `publish` |
 | `os-avahi-reflector` | `LegoTypes/plugins`, branch `add-avahi-reflector` | release only, `avahi` (being retired in favour of net/netflector; not offered to firewalls) |
 
