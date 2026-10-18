@@ -15,6 +15,7 @@ on:
           - os-wg-client-tunnels
           - os-mac-alias-cache
           - os-wan-failover
+          - os-unbound-upstream
           - os-legotypes
 
 permissions: {}

@@ -13,6 +13,7 @@ The plugins, what they do and how to install them: <https://legotypes.github.io>
 | `os-wg-client-tunnels` | `LegoTypes/plugins`, branch `add-wg-ipv6-gateway` | catalogue, `publish` |
 | `os-mac-alias-cache` | `LegoTypes/plugins`, branch `add-mac-alias-cache` | catalogue, `publish` |
 | `os-wan-failover` | `LegoTypes/plugins`, branch `add-wan-failover` | catalogue, `publish` (not on the site) |
+| `os-unbound-upstream` | `LegoTypes/plugins`, branch `add-unbound-upstream` | catalogue, `publish` (not on the site) |
 | `os-legotypes` | this repository, `vendor/legotypes` on `main` | catalogue, `publish` |
 
 1. Commit the change on its branch with a `PLUGIN_VERSION` or `PLUGIN_REVISION` bump and push it. A run whose version already has a release fails before anything is published: pkg would not see an unchanged version as an update.

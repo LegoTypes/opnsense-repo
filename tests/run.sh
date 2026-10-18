@@ -39,7 +39,7 @@ conf 'os-alpha-2 Org/plugins br net/a yes'
 expect_fail "name with -digit" pk row os-alpha-2
 expect_fail "usage" pk
 expect_eq "real file: catalogue" "$(sh "$root/scripts/packages.sh" catalogue | tr '\n' ' ')" \
-	"os-wg-client-tunnels os-mac-alias-cache os-wan-failover os-legotypes "
+	"os-wg-client-tunnels os-mac-alias-cache os-wan-failover os-unbound-upstream os-legotypes "
 
 # --- repo.sh -----------------------------------------------------------------
 rc() { printf '%s\n' "$@" >"$T/repo.conf"; }
