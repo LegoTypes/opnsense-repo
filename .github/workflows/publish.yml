@@ -1,7 +1,8 @@
 name: publish
 
 # Publish one catalogue package at the commit the owner names: build it (build.yml's
-# build job, no secret), and once the owner has read its summary and approved the
+# build job, no secret), review it on a runner of its own (build.yml's review job, which
+# writes the summary), and once the owner has read that summary and approved the
 # "release" environment, check it against that commit's source, carry the other
 # catalogue packages forward from their releases unchanged and sign the catalogue
 # (build.yml's sign job); deploy it to GitHub Pages, then record the build as release
@@ -52,7 +53,7 @@ jobs:
   # called workflow's jobs), so the deploy waits for the signed catalogue
   deploy:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pages: write
       id-token: write
@@ -64,10 +65,11 @@ jobs:
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 
   # only after the deploy: a failed deploy leaves no release, so the same
-  # version can be published again
+  # version can be published again. The notes carry the review job's source and build
+  # lines, never the build VM's.
   release:
     needs: [build, deploy]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -78,8 +80,15 @@ jobs:
         with:
           name: package
           path: out
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: review
+          path: review
       - name: Record the build as release ${{ needs.build.outputs.tag }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: bash scripts/release.sh create out/*.pkg "$(cat out/source)" out/build
+          PACKAGE: ${{ inputs.package }}
+        run: |
+          bash scripts/out-dir.sh "$PACKAGE" out
+          bash scripts/release.sh create out/*.pkg "$(cat review/source)" review/build

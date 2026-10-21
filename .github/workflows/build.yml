@@ -1,13 +1,19 @@
 name: build
 
-# One package from packages.conf, in two jobs. "build" builds it in a FreeBSD 15 VM with no
-# secret and no environment, and writes the summary the owner reads before approving.
-# "sign", in the "release" environment (its approval and its one secret), checks the build
-# against the plugin source at the approved commit, carries every other catalogue package
-# forward from its release, signs the catalogue and uploads the Pages site for the caller to
-# deploy; it runs only this repository's scripts and GitHub's own actions. The build is left
-# as the artifact "package" (out/: the .pkg, source, build and manifest); the caller turns it
-# into a release once everything else has succeeded.
+# One package from packages.conf, in three jobs, each on a runner of its own:
+#   build   builds it in a FreeBSD 15 VM. The VM, the action that runs it and whatever they
+#           download share this runner, so after the VM the job only checks out/ and uploads
+#           it as the artifact "package" (the .pkg, and the VM's source and build lines).
+#   review  on a fresh runner, with this repository's scripts and GitHub's actions only:
+#           composes the release notes' lines from trusted inputs, checks the version is new,
+#           writes the manifest, runs the payload check and writes the summary the owner reads
+#           before approving; uploads the artifact "review" (manifest, source, build).
+#   sign    in the "release" environment (its approval and its one secret): checks the build
+#           against the plugin source at the approved commit, carries every other catalogue
+#           package forward from the releases the review job's manifest names, signs the
+#           catalogue and uploads the Pages site for the caller to deploy.
+# No job has a secret but sign. The caller turns the build into a release once everything else
+# has succeeded, with the review job's lines.
 on:
   workflow_call:
     inputs:
@@ -24,7 +30,7 @@ on:
     outputs:
       tag:
         description: The release tag the build will get, <name>-<version>
-        value: ${{ jobs.build.outputs.tag }}
+        value: ${{ jobs.review.outputs.tag }}
 
 defaults:
   run:
@@ -32,13 +38,11 @@ defaults:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    # No environment and no secret: the VM, the action that runs it and whatever they
-    # download can change only this job's output, which the sign job checks.
+    runs-on: ubuntu-24.04
+    # No environment and no secret: nothing this job does after the VM is trusted, and the
+    # review and sign jobs check what it uploads.
     permissions:
       contents: read
-    outputs:
-      tag: ${{ steps.check.outputs.tag }}
     env:
       PACKAGE: ${{ inputs.package }}
       CATALOGUE: ${{ inputs.catalogue }}
@@ -79,6 +83,11 @@ jobs:
           cat upstream.env
           sed -n 's/^\(PHP\|PYTHON\)=/UPSTREAM_\1=/p' upstream.env >> "$GITHUB_ENV"
 
+      # the VM syncs the workspace back, scripts/ included: the out/ check runs from a copy
+      # taken before it ran
+      - name: Keep out-dir.sh out of the VM's reach
+        run: cp scripts/out-dir.sh "$RUNNER_TEMP/out-dir.sh"
+
       - name: Build in FreeBSD 15
         uses: vmactions/freebsd-vm@a2f9a41fa97f6848b8c3b791087dfcdaa5b473ff # v1.5.8
         with:
@@ -91,21 +100,52 @@ jobs:
             umask 022
             sh scripts/build-package.sh "$PACKAGE" "$COMMIT"
 
-      # The VM synced the workspace back, so nothing in it, .git included, runs again: it is
-      # moved aside whole, by bash and mv alone, and the commit is checked out afresh.
-      - name: Set the VM's workspace aside
-        run: |
-          shopt -s dotglob nullglob
-          mkdir "$RUNNER_TEMP/vm"
-          entries=(./*)
-          mv -- "${entries[@]}" "$RUNNER_TEMP/vm/"
+      # regular files of the expected names only: upload-artifact follows symlinks
+      - name: Check out/
+        run: bash "$RUNNER_TEMP/out-dir.sh" "$PACKAGE" out
 
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: package
+          path: out/
+          if-no-files-found: error
+
+  review:
+    needs: build
+    runs-on: ubuntu-24.04
+    # A runner the VM never touched; no environment and no secret. Nothing here prints the
+    # package's text to the log: the summary goes to the summary file, and every message
+    # quotes what it names.
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+    env:
+      PACKAGE: ${{ inputs.package }}
+      COMMIT: ${{ inputs.commit }}
+    steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # the full history: the vendor package's source line names the last commit that changed it
+          fetch-depth: 0
 
-      - name: Take out/ from the VM's workspace, which must be otherwise unchanged
-        run: bash scripts/from-vm.sh "$PACKAGE" "$RUNNER_TEMP/vm"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: package
+          path: out
+
+      - name: Check the build
+        run: bash scripts/out-dir.sh "$PACKAGE" out
+
+      - name: Upstream facts
+        run: |
+          bash scripts/upstream.sh > upstream.env
+          cat upstream.env
+          sed -n 's/^\(PHP\|PYTHON\)=/UPSTREAM_\1=/p' upstream.env >> "$GITHUB_ENV"
+
+      - name: The release notes' source and build lines
+        run: bash scripts/provenance.sh "$PACKAGE" out review
 
       - name: Check the version is new
         id: check
@@ -122,7 +162,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
           # what firewalls are served now (each served tree's packages.txt), checked against the releases
           LIVE_SITE: https://legotypes.github.io/opnsense-repo
-        run: bash scripts/manifest.sh "$PACKAGE" out
+        run: |
+          bash scripts/manifest.sh "$PACKAGE" out
+          mv out/manifest review/manifest
 
       # data for the payload check, never run
       - name: The plugin source at the commit
@@ -139,20 +181,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PLUGIN_DIR: ${{ steps.source.outputs.dir }}
-        run: bash scripts/summary.sh "$PACKAGE" out >> "$GITHUB_STEP_SUMMARY"
+        run: bash scripts/summary.sh "$PACKAGE" out review >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: package
-          path: out/
+          name: review
+          path: review/
           if-no-files-found: error
 
   sign:
-    needs: build
+    needs: review
     if: inputs.catalogue
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # PKG_SIGNING_KEY is a secret of the "release" environment, which runs only from main and
-    # only after the owner approves the run, having read the build job's summary. A job
+    # only after the owner approves the run, having read the review job's summary. A job
     # calling a reusable workflow cannot name an environment, so it is named here. Every
     # action is GitHub's own, pinned to a commit; the rest is this repository's scripts, pkg
     # built from a pinned source and Ubuntu's archive, all before the key is staged.
@@ -169,18 +211,26 @@ jobs:
         with:
           persist-credentials: false
 
-      - id: artifact
+      - id: package
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: package
           path: out
 
+      - id: review
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: review
+          path: review
+
       - name: Check the build
         env:
-          ARTIFACT: ${{ steps.artifact.outcome }}
+          PACKAGE_ARTIFACT: ${{ steps.package.outcome }}
+          REVIEW_ARTIFACT: ${{ steps.review.outcome }}
         run: |
-          if [ "$ARTIFACT" != success ]; then
+          if [ "$PACKAGE_ARTIFACT" != success ] || [ "$REVIEW_ARTIFACT" != success ]; then
             echo "::error::no package artifact: re-run the whole workflow"
             exit 1
           fi
@@ -209,6 +259,13 @@ jobs:
           echo "::$token::"
           exit "$rc"
 
+      # the approval can come hours after the review job's check
+      - name: Check the version is still new
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash scripts/release.sh check out/*.pkg
+
       # pkg repo needs no FreeBSD host; built before the key is staged, as apt runs as root
       - name: Build pkg from its pinned source
         id: pkg
@@ -223,7 +280,7 @@ jobs:
           # what firewalls are served now (each served tree's packages.txt), checked against the releases
           LIVE_SITE: https://legotypes.github.io/opnsense-repo
           # the releases carried must be those of the manifest the owner approved
-          MANIFEST: out/manifest
+          MANIFEST: review/manifest
         run: bash scripts/carry-forward.sh "$PACKAGE"
 
       # The signing key goes into the workspace, never into site/; sign-catalogue.sh removes

@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# summary.sh <package> <out dir>
-# Markdown for the build job's summary ($GITHUB_STEP_SUMMARY), what the owner reads before
-# approving the sign job: the approved commit; the built file, its sha256 and the source line
-# its release notes will start with; the manifest (manifest.sh), whose carry lines the sign
-# job must find unchanged; the payload check (payload.sh: informational here, the sign job
-# enforces it), with the install scripts as pkg will run them; compare-package.sh between
-# the package's newest release and this build, as the canary reports it, or that there is no
-# release yet; the version file the package installs; the build environment (out/build).
-# Everything the build made (the package, out/, the manifest that names the built file) and
-# the release's tag are printed inside fenced code blocks, each fence longer than any run of
-# backticks inside it, so none of it is read as markdown; outside them are only this
-# script's own words, the package name (packages.conf) and the commit (checked). Nothing
-# from the build goes to stderr, which is the job's log.
+# summary.sh <package> <out dir> <review dir>
+# Markdown for the review job's summary ($GITHUB_STEP_SUMMARY), what the owner reads before
+# approving the sign job: the approved commit; the built file (<out dir>, the build job's
+# artifact), its sha256 and the source line its release notes will start with; the manifest,
+# whose carry lines the sign job must find unchanged; the payload check (payload.sh:
+# informational here, the sign job enforces it), with the install scripts as pkg will run
+# them; compare-package.sh between the package's newest release and this build, as the
+# canary reports it, or that there is no release yet; the version file the package installs;
+# the build lines of the release notes. The source line, the build lines and the manifest are
+# <review dir>'s, which the review job wrote (provenance.sh, manifest.sh), never the VM's.
+# Everything the build made (the package, the manifest that names the built file, the
+# FreeBSD version the VM reported) and the release's tag are printed inside fenced code
+# blocks, each fence longer than any run of backticks inside it, so none of it is read as
+# markdown; outside them are only this script's own words, the package name (packages.conf)
+# and the commit (checked). Nothing from the build goes to stderr, which is the job's log.
 # Environment: COMMIT, the approved commit (40 lower-case hex digits); PLUGIN_DIR, the
 # plugin's directory at it (plugin-source.sh); GH_REPO and GH_TOKEN for gh, which only reads.
 # Exits 0 once the summary is complete, whatever the payload check found; 1 when any part of
@@ -36,13 +38,15 @@ fence() {
 	printf '%s\n%s\n%s\n\n' "$f" "$1" "$f"
 }
 
-[[ $# -eq 2 ]] || die "usage: summary.sh <package> <out dir>"
-pkg=$1 out=$2
+[[ $# -eq 3 ]] || die "usage: summary.sh <package> <out dir> <review dir>"
+pkg=$1 out=$2 rev=$3
 [[ ${COMMIT:-} =~ ^[0-9a-f]{40}$ ]] || die "COMMIT must be the approved commit, 40 lower-case hex digits"
 [[ -n ${PLUGIN_DIR:-} ]] || die "PLUGIN_DIR must name the plugin's directory at the commit (plugin-source.sh)"
 sh "$here/packages.sh" row "$pkg" >/dev/null
 file=$(bash "$here/out-dir.sh" "$pkg" "$out")
-[[ -f $out/manifest ]] || die "$out holds no manifest: run manifest.sh first"
+for f in source build manifest; do
+	[[ -f $rev/$f && ! -L $rev/$f ]] || die "$rev holds no $f: run provenance.sh and manifest.sh first"
+done
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -72,10 +76,10 @@ printf '### Built package\n\n'
 fence "${file##*/}
 sha256 $(sha256sum "$file" | cut -d' ' -f1)"
 printf 'Its release notes will start with:\n\n'
-fence "$(cat "$out/source")"
+fence "$(cat "$rev/source")"
 printf '### Manifest\n\n'
 printf 'The releases the sign job carries forward (each checked against the sha256 its notes record, and refused if any has changed since), the built package and the commit:\n\n'
-fence "$(cat "$out/manifest")"
+fence "$(cat "$rev/manifest")"
 if ((payload_rc == 0)); then
 	printf '### Payload check: passed\n\n'
 	printf 'The package holds exactly what the plugin source at the commit installs. The install scripts, as pkg will run them:\n\n'
@@ -102,4 +106,5 @@ else
 	fence "${versions%$'\n'}"
 fi
 printf '### Build environment\n\n'
-fence "$(cat "$out/build")"
+printf 'The build lines of the release notes:\n\n'
+fence "$(cat "$rev/build")"

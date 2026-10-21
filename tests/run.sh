@@ -179,8 +179,9 @@ yflat() {
 # yget <flattened> <path>: the values at exactly that path, one per line
 yget() { awk -F'\t' -v p="$2" '$1 == p { print $2 }' <<<"$1"; }
 # ymarks <flattened> <job>: one line per step of the job, in order, naming what it does: the
-# action it uses (without @<ref>), each scripts/<name>.sh its run (or the VM's run) names,
-# "stage" if it reads PKG_SIGNING_KEY, "unstage" if it removes .signing; "-" for none of these
+# action it uses (without @<ref>), each scripts/<name>.sh its run (or the VM's run) names and
+# each $RUNNER_TEMP/<name>.sh as tmp:<name>.sh, "stage" if it reads PKG_SIGNING_KEY, "unstage"
+# if it removes .signing; "-" for none of these
 ymarks() {
 	awk -F'\t' -v j="jobs.$2.steps." '
 		function add(n, w) { if (index(" " m[n] " ", " " w " ") == 0) m[n] = m[n] (m[n] == "" ? "" : " ") w }
@@ -199,8 +200,9 @@ ymarks() {
 			if (k == "env.PKG_SIGNING_KEY") add(n, "stage")
 			if (k == "run" || k == "with.run") {
 				s = $2
-				while (match(s, /scripts\/[a-z0-9-]+\.sh/)) {
-					add(n, substr(s, RSTART + 8, RLENGTH - 8))
+				while (match(s, /(scripts|RUNNER_TEMP)\/[a-z0-9-]+\.sh/)) {
+					w = substr(s, RSTART, RLENGTH)
+					add(n, (w ~ /^RUNNER_TEMP/ ? "tmp:" : "") substr(w, index(w, "/") + 1))
 					s = substr(s, RSTART + RLENGTH)
 				}
 				if ($2 ~ /rm -rf \.signing/) add(n, "unstage")
@@ -209,8 +211,10 @@ ymarks() {
 		END { for (i = 1; i <= max; i++) print (m[i] == "" ? "-" : m[i]) }
 	' <<<"$1"
 }
-# ystep <marks> <word>: the number of the step whose marks hold <word> (empty if none)
+# ystep <marks> <word>: the number of the first step whose marks hold <word> (empty if none)
 ystep() { awk -v w="$2" 'index(" " $0 " ", " " w " ") { print NR; exit }' <<<"$1"; }
+# yjobs <flattened>: the workflow's jobs, in order
+yjobs() { awk -F'\t' '$1 ~ /^jobs\./ { split($1, a, "."); if (!s[a[2]]++) print a[2] }' <<<"$1"; }
 wf="$root/.github/workflows"
 B=$(yflat "$wf/build.yml")
 P=$(yflat "$wf/publish.yml")
@@ -243,6 +247,17 @@ for w in build publish canary; do
 	if [[ $w != build ]]; then
 		expect_eq "$w.yml: no signing key" "$(awk -F'\t' '($1 $2) ~ /PKG_SIGNING_KEY|\.signing/' <<<"$f")" ""
 	fi
+	# an expression in a run: is pasted into the script before it runs; values go through env:
+	expect_eq "$w.yml: no \${{ in a run:" "$(awk -F'\t' '$1 ~ /\.run$/ && index($2, "${{") { print $1 }' <<<"$f")" ""
+	if [[ $w != canary ]]; then
+		# pkg 2.8.4, pkg-tool.sh's dependencies and ubuntu-apt.sh's ubuntu.sources are proven on 24.04
+		mis=''
+		for j in $(yjobs "$f"); do
+			[[ -n $(yget "$f" "jobs.$j.uses") ]] && continue
+			[[ $(yget "$f" "jobs.$j.runs-on") == ubuntu-24.04 ]] || mis+="$j "
+		done
+		expect_eq "$w.yml: every job runs on ubuntu-24.04" "$mis" ""
+	fi
 done
 expect_eq "canary.yml: no environment and no secret" "$(awk -F'\t' '$1 ~ /environment/ || $2 ~ /secrets/' <<<"$C")" ""
 
@@ -255,71 +270,109 @@ expect_eq "publish.yml: the environment's secret reaches the called workflow" "$
 expect_eq "publish.yml: no other secret" "$(awk -F'\t' '$2 ~ /secrets/' <<<"$P")" ""
 expect_eq "publish.yml: deploy waits for build.yml, signing included" "$(yget "$P" jobs.deploy.needs)" build
 expect_eq "publish.yml: release waits for the deploy" "$(yget "$P" jobs.release.needs)" "[build, deploy]"
-expect_eq "publish.yml: the tag still comes from the build job" "$(yget "$B" on.workflow_call.outputs.tag.value)" \
-	'${{ jobs.build.outputs.tag }}'
+expect_eq "build.yml: the tag comes from the review job" "$(yget "$B" on.workflow_call.outputs.tag.value)" \
+	'${{ jobs.review.outputs.tag }}'
 expect_eq "build.yml: a required commit input" \
 	"$(yget "$B" on.workflow_call.inputs.commit.type) $(yget "$B" on.workflow_call.inputs.commit.required)" "string true"
+# the release notes are the review job's lines, never the VM's
+rm_=$(ymarks "$P" release)
+expect_eq "publish.yml: release takes both artifacts, checks the build, then releases" "$(tr '\n' ',' <<<"$rm_")" \
+	"actions/checkout,actions/download-artifact,actions/download-artifact,out-dir.sh release.sh,"
+expect_eq "publish.yml: release downloads package into out and review into review" \
+	"$(for i in 2 3; do printf '%s=%s ' "$(yget "$P" "jobs.release.steps.$i.with.name")" "$(yget "$P" "jobs.release.steps.$i.with.path")"; done)" \
+	"package=out review=review "
+expect_eq "publish.yml: the release notes come from review/, not out/" \
+	"$(yget "$P" jobs.release.steps.4.run | awk '/release\.sh create/ && /review\/source/ && /review\/build/ && !/out\/source|out\/build/ { print "review" }')" review
 
-# build.yml: two jobs; build has no environment and no secret, sign has both and only GitHub's actions
-expect_eq "build.yml: the jobs" "$(awk -F'\t' '$1 ~ /^jobs\./ { split($1, a, "."); if (!s[a[2]]++) print a[2] }' <<<"$B" | tr '\n' ' ')" \
-	"build sign "
+# build.yml: three jobs; build and review have no environment and no secret, sign has both;
+# review and sign run only GitHub's actions and this repository's scripts
+expect_eq "build.yml: the jobs" "$(yjobs "$B" | tr '\n' ' ')" "build review sign "
 expect_eq "build.yml: sign names the release environment" "$(awk -F'\t' '$1 ~ /^jobs\.sign\.environment(\.name)?$/ { print $2 }' <<<"$B")" release
-expect_eq "build.yml: build names no environment" "$(awk -F'\t' '$1 ~ /^jobs\.build\.environment/' <<<"$B")" ""
+expect_eq "build.yml: only sign names an environment" "$(awk -F'\t' '$1 ~ /^jobs\.[^.]+\.environment/ && $1 !~ /^jobs\.sign\./ { print $1 }' <<<"$B")" ""
 expect_eq "build.yml: secrets only in the sign job" "$(awk -F'\t' '$2 ~ /secrets/ && $1 !~ /^jobs\.sign\./ { print $1 }' <<<"$B")" ""
-expect_eq "build.yml: the build job names no secret" "$(awk -F'\t' '$1 ~ /^jobs\.build\./ && $2 ~ /secrets/' <<<"$B")" ""
 expect_eq "build.yml: the signing key only in the sign job" \
 	"$(awk -F'\t' '($1 $2) ~ /PKG_SIGNING_KEY|\.signing/ && $1 !~ /^jobs\.sign\./ { print $1 }' <<<"$B")" ""
-expect_eq "build.yml: sign uses only GitHub's actions" \
-	"$(awk -F'\t' '$1 ~ /^jobs\.sign\.(.*\.)?uses$/ && $2 !~ /^actions\// { print $2 }' <<<"$B")" ""
-expect_eq "build.yml: sign uses three of them" "$(awk -F'\t' '$1 ~ /^jobs\.sign\.(.*\.)?uses$/' <<<"$B" | wc -l | tr -d ' ')" 3
-expect_eq "build.yml: sign waits for build" "$(yget "$B" jobs.sign.needs)" build
+for j in review sign; do
+	expect_eq "build.yml: $j uses only GitHub's actions" \
+		"$(awk -F'\t' -v j="$j" '$1 ~ ("^jobs\\." j "\\.(.*\\.)?uses$") && $2 !~ /^actions\// { print $2 }' <<<"$B")" ""
+done
+expect_eq "build.yml: review uses three of them" "$(awk -F'\t' '$1 ~ /^jobs\.review\.(.*\.)?uses$/' <<<"$B" | wc -l | tr -d ' ')" 3
+expect_eq "build.yml: sign uses four of them" "$(awk -F'\t' '$1 ~ /^jobs\.sign\.(.*\.)?uses$/' <<<"$B" | wc -l | tr -d ' ')" 4
+expect_eq "build.yml: review waits for build" "$(yget "$B" jobs.review.needs)" build
+expect_eq "build.yml: sign waits for review" "$(yget "$B" jobs.sign.needs)" review
 expect_eq "build.yml: sign only for a catalogue build" "$(yget "$B" jobs.sign.if)" inputs.catalogue
 expect_eq "build.yml: sign has a timeout" "$(yget "$B" jobs.sign.timeout-minutes | awk '/^[0-9]+$/ { print "minutes" }')" minutes
-for j in build sign; do
+for j in build review sign; do
 	expect_eq "build.yml: $j only reads the repository" \
 		"$(awk -F'\t' -v p="jobs.$j.permissions" 'index($1, p) == 1 { print substr($1, length(p) + 2) "=" $2 }' <<<"$B")" "contents=read"
 done
+expect_eq "build.yml: only review has outputs, the tag" \
+	"$(awk -F'\t' '$1 ~ /^jobs\.[^.]+\.outputs\./ { print $1 "=" $2 }' <<<"$B")" 'jobs.review.outputs.tag=${{ steps.check.outputs.tag }}'
 expect_eq "build.yml: no ::error:: line repeats the commit as given" \
 	"$(awk -F'\t' '$2 ~ /::error::/ && $2 ~ /COMMIT|inputs\.commit/' <<<"$B")" ""
 
-# the build job: the VM only builds; nothing it left in the workspace runs, a fresh checkout does
+# the build job shares its runner with the VM: after the VM only the out/ check, with a copy of
+# out-dir.sh taken before the VM ran (the VM syncs the workspace back), and the upload
 bm=$(ymarks "$B" build)
 expect_eq "build: the steps in order" "$(tr '\n' ',' <<<"$bm")" \
-	"actions/checkout,packages.sh,upstream.sh,vmactions/freebsd-vm build-package.sh,-,actions/checkout,from-vm.sh,release.sh,manifest.sh,plugin-source.sh,ubuntu-apt.sh,summary.sh,actions/upload-artifact,"
+	"actions/checkout,packages.sh,upstream.sh,out-dir.sh tmp:out-dir.sh,vmactions/freebsd-vm build-package.sh,tmp:out-dir.sh,actions/upload-artifact,"
 vmstep=$(ystep "$bm" vmactions/freebsd-vm)
 expect_eq "build: the VM runs build-package.sh and nothing else" \
 	"$(yget "$B" "jobs.build.steps.$vmstep.with.run" | tr '\n' ';')" 'set -e;umask 022;sh scripts/build-package.sh "$PACKAGE" "$COMMIT";'
 expect_eq "build: the VM gets no key, no pkg repo, no site/" \
 	"$(awk -F'\t' -v p="jobs.build.steps.$vmstep." 'index($1, p) == 1 && $2 ~ /signing|KEY|pkg repo|site/' <<<"$B")" ""
-expect_eq "build: the VM's workspace is set aside by the step after it, which runs no script" \
-	"$(yget "$B" "jobs.build.steps.$((vmstep + 1)).run" | awk '/RUNNER_TEMP/ && /mv / { print "aside" }')" aside
-expect_eq "build: the summary goes to the job's summary" \
-	"$(yget "$B" "jobs.build.steps.$(ystep "$bm" summary.sh).run" | awk '/scripts\/summary\.sh/ && />> *"\$GITHUB_STEP_SUMMARY"/ { print "summary" }')" summary
-expect_eq "build: the artifact is out/" \
-	"$(yget "$B" "jobs.build.steps.$(ystep "$bm" actions/upload-artifact).with.name") $(yget "$B" "jobs.build.steps.$(ystep "$bm" actions/upload-artifact).with.path")" \
-	"package out/"
+expect_eq "build: out-dir.sh is copied out of the workspace just before the VM" \
+	"$(yget "$B" "jobs.build.steps.$((vmstep - 1)).run")" 'cp scripts/out-dir.sh "$RUNNER_TEMP/out-dir.sh"'
+expect_eq "build: the step after the VM runs exactly that copy on out/" \
+	"$(yget "$B" "jobs.build.steps.$((vmstep + 1)).run")" 'bash "$RUNNER_TEMP/out-dir.sh" "$PACKAGE" out'
+expect_eq "build: and then only the upload, of out/ as package" \
+	"$(( $(wc -l <<<"$bm") - vmstep )) $(yget "$B" "jobs.build.steps.$((vmstep + 2)).with.name") $(yget "$B" "jobs.build.steps.$((vmstep + 2)).with.path")" \
+	"2 package out/"
+
+# the review job, on a runner the VM never touched: everything the approver reads, and the release
+# notes' lines, made by this repository's scripts from its own checkout
+rv=$(ymarks "$B" review)
+expect_eq "review: the steps in order" "$(tr '\n' ',' <<<"$rv")" \
+	"actions/checkout,actions/download-artifact,out-dir.sh,upstream.sh,provenance.sh,release.sh,manifest.sh,plugin-source.sh,ubuntu-apt.sh,summary.sh,actions/upload-artifact,"
+expect_eq "review: the full history, for the last commit that changed this repository's package" \
+	"$(yget "$B" jobs.review.steps.1.with.fetch-depth)" 0
+expect_eq "review: downloads package into out" "$(yget "$B" jobs.review.steps.2.with.name) $(yget "$B" jobs.review.steps.2.with.path)" "package out"
+expect_eq "review: the version check gives the tag" "$(yget "$B" "jobs.review.steps.$(ystep "$rv" release.sh).id")" check
+expect_eq "review: the manifest goes to review/" \
+	"$(yget "$B" "jobs.review.steps.$(ystep "$rv" manifest.sh).run" | tr '\n' ';')" 'bash scripts/manifest.sh "$PACKAGE" out;mv out/manifest review/manifest;'
+expect_eq "review: the summary goes to the job's summary" \
+	"$(yget "$B" "jobs.review.steps.$(ystep "$rv" summary.sh).run")" 'bash scripts/summary.sh "$PACKAGE" out review >> "$GITHUB_STEP_SUMMARY"'
+expect_eq "review: the artifact is review/" \
+	"$(yget "$B" "jobs.review.steps.$(ystep "$rv" actions/upload-artifact).with.name") $(yget "$B" "jobs.review.steps.$(ystep "$rv" actions/upload-artifact).with.path")" \
+	"review review/"
 
 # the sign job: everything that can run code as root or fetch anything comes before the key; the
 # key is removed whatever happens
 sm=$(ymarks "$B" sign)
 expect_eq "sign: the steps in order" "$(tr '\n' ',' <<<"$sm")" \
-	"actions/checkout,actions/download-artifact,out-dir.sh,plugin-source.sh,ubuntu-apt.sh,payload.sh,pkg-tool.sh,carry-forward.sh,stage,sign-catalogue.sh,unstage,actions/upload-pages-artifact,"
-pt_step=$(ystep "$sm" pkg-tool.sh) stage_step=$(ystep "$sm" stage)
+	"actions/checkout,actions/download-artifact,actions/download-artifact,out-dir.sh,plugin-source.sh,ubuntu-apt.sh,payload.sh,release.sh,pkg-tool.sh,carry-forward.sh,stage,sign-catalogue.sh,unstage,actions/upload-pages-artifact,"
+pt_step=$(ystep "$sm" pkg-tool.sh) stage_step=$(ystep "$sm" stage) rel_step=$(ystep "$sm" release.sh)
 expect_eq "sign: pkg-tool.sh runs before the key is staged" \
 	"$([[ -n $pt_step && -n $stage_step ]] && ((pt_step < stage_step)) && echo before)" before
+expect_eq "sign: the version is checked again before the key is staged" \
+	"$([[ -n $rel_step && -n $stage_step ]] && ((rel_step < stage_step)) && echo before) $(yget "$B" "jobs.sign.steps.$rel_step.run")" \
+	'before bash scripts/release.sh check out/*.pkg'
+expect_eq "sign: downloads package into out and review into review" \
+	"$(for i in 2 3; do printf '%s=%s ' "$(yget "$B" "jobs.sign.steps.$i.with.name")" "$(yget "$B" "jobs.sign.steps.$i.with.path")"; done)" \
+	"package=out review=review "
 expect_eq "sign: the key comes from the release environment's secret" \
 	"$(yget "$B" "jobs.sign.steps.$stage_step.env.PKG_SIGNING_KEY")" '${{ secrets.PKG_SIGNING_KEY }}'
 expect_eq "sign: the key is staged private, and an empty secret fails" \
 	"$(yget "$B" "jobs.sign.steps.$stage_step.run" | awk '/^umask 077$/ { u = 1 } /-z "\$PKG_SIGNING_KEY"/ { e = 1 } END { print u + e }')" 2
 expect_eq "sign: the key is removed whatever happened" "$(yget "$B" "jobs.sign.steps.$(ystep "$sm" unstage).if")" "always()"
 expect_eq "sign: a missing artifact is named" \
-	"$(yget "$B" "jobs.sign.steps.$(ystep "$sm" out-dir.sh).run" | awk '/no package artifact: re-run the whole workflow/ { print "named" }')" named
+	"$(yget "$B" "jobs.sign.steps.$(ystep "$sm" out-dir.sh).run" | awk '/no package artifact: re-run the whole workflow/ { n++ } END { print n + 0 }')" 1
 for s in payload.sh sign-catalogue.sh; do
 	expect_eq "sign: $s output is never read as a workflow command" \
 		"$(yget "$B" "jobs.sign.steps.$(ystep "$sm" "$s").run" | awk '/::stop-commands::/ { print "stopped" }')" stopped
 done
-expect_eq "sign: the carried releases must be the approved manifest's" \
-	"$(yget "$B" "jobs.sign.steps.$(ystep "$sm" carry-forward.sh).env.MANIFEST")" out/manifest
+expect_eq "sign: the carried releases must be the review job's manifest's" \
+	"$(yget "$B" "jobs.sign.steps.$(ystep "$sm" carry-forward.sh).env.MANIFEST")" review/manifest
 expect_eq "sign: the Pages site is site/" "$(yget "$B" "jobs.sign.steps.$(ystep "$sm" actions/upload-pages-artifact).with.path")" site
 
 # --- release.sh and carry-forward.sh -----------------------------------------
@@ -1586,10 +1639,11 @@ expect_eq "pkg-tool installs its dependencies with ubuntu-apt.sh" \
 
 # --- out-dir.sh: a build's output, as the VM left it ---------------------------------------
 od="$T/od"
+# odset [<package>]: $od, a build of <package> (default os-alpha) as build-package.sh leaves one
 odset() {
 	rm -rf "$od"
 	mkdir -p "$od"
-	echo pkg >"$od/os-alpha-1.0_1.pkg"
+	echo pkg >"$od/${1:-os-alpha}-1.0_1.pkg"
 	printf 'Built from Org/plugins, branch br-alpha, commit %s.\n' "$commit" >"$od/source"
 	printf 'abi: FreeBSD:15:amd64\nseries: 26.7\nfreebsd: 15.1-RELEASE-p3\nphp: 85\npython: 313\n' >"$od/build"
 }
@@ -1597,13 +1651,15 @@ odr() { bash "$root/scripts/out-dir.sh" "${1:-os-alpha}" "$od"; }
 odset
 expect_eq "out-dir: prints the package" "$(odr)" "$od/os-alpha-1.0_1.pkg"
 echo manifest >"$od/manifest"
-expect_eq "out-dir: and the manifest, once manifest.sh wrote it" "$(odr)" "$od/os-alpha-1.0_1.pkg"
+expect_fail "out-dir: a manifest (the review job's, never in out/)" odr
 odset && touch "$od/extra"
 expect_fail "out-dir: another file" odr
 odset && mkdir "$od/sub"
 expect_fail "out-dir: a directory" odr
-odset && ln -s source "$od/manifest"
+odset && ln -s source "$od/link"
 expect_fail "out-dir: a symlink" odr
+odset && rm "$od/source" && ln -s /etc/hosts "$od/source"
+expect_fail "out-dir: source a symlink" odr
 odset && rm "$od/os-alpha-1.0_1.pkg" && ln -s /etc/hosts "$od/os-alpha-1.0_1.pkg"
 expect_fail "out-dir: the package a symlink" odr
 odset && echo pkg >"$od/os-alpha-1.1.pkg"
@@ -1642,85 +1698,65 @@ vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_R
 expect_eq "out-dir: build-package.sh's output for this repository's package" \
 	"$(bash "$root/scripts/out-dir.sh" os-vendor "$W/out")" "$W/out/os-vendor-1.0_2.pkg"
 
-# --- from-vm.sh: the workspace the VM synced back, checked from a fresh checkout ------------
+# --- a GitHub stand-in for the scripts that clone (real git) -----------------------------------
 # git with no global or system configuration (no hooks, no signing), and a fixed author
 gitq() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -c user.name=test -c user.email=test@example.org -c init.defaultBranch=main "$@"; }
-# fvset: $T/fresh, a checkout of a commit; $T/copy, the same workspace after the VM built in it
-fvset() {
-	rm -rf "$T/fresh" "$T/copy" "$T/fsmonitor-ran"
-	mkdir -p "$T/fresh/scripts" "$T/fresh/vendor/v"
-	gitq init -q "$T/fresh"
-	printf 'site/\n.signing/\n' >"$T/fresh/.gitignore"
-	printf 'echo summary\n' >"$T/fresh/scripts/summary.sh"
-	printf 'PLUGIN_NAME= v\n' >"$T/fresh/vendor/v/Makefile"
-	gitq -C "$T/fresh" add -A
-	gitq -C "$T/fresh" commit -qm fixture
-	cp -R "$T/fresh" "$T/copy"
-	odset
-	mv "$od" "$T/copy/out"
-	echo 'PHP=85' >"$T/copy/upstream.env"
+# ghenv <command>: <command> with https://github.com/<repo>.git served from $T/gh/<repo>.git
+ghenv() {
+	GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=1 \
+		GIT_CONFIG_KEY_0="url.file://$T/gh/.insteadOf" GIT_CONFIG_VALUE_0=https://github.com/ "$@"
 }
-fv() { (cd "$T/fresh" && GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 bash "$root/scripts/from-vm.sh" os-alpha "$T/copy"); }
-fvset
-fv >/dev/null || bad "from-vm: an unchanged workspace exited non-zero"
-expect_eq "from-vm: out/ moves to the fresh checkout" "$(names "$T/fresh/out") $(exists "$T/copy/out")" \
-	"build os-alpha-1.0_1.pkg source  no"
-fvset && rm "$T/copy/upstream.env"
-expect_eq "from-vm: no upstream.env is fine" "$(fv >/dev/null 2>&1; echo "rc=$?")" "rc=0"
-fvset && echo 'echo forged' >"$T/copy/scripts/summary.sh"
-expect_fail "from-vm: a changed script" fv
-expect_eq "from-vm: a refused workspace leaves no out/ here" "$(exists "$T/fresh/out")" no
-fvset && chmod 755 "$T/copy/scripts/summary.sh"
-expect_fail "from-vm: a changed mode" fv
-fvset && rm "$T/copy/vendor/v/Makefile"
-expect_fail "from-vm: a removed file" fv
-fvset && echo x >"$T/copy/scripts/extra.sh"
-expect_fail "from-vm: an added file" fv
-fvset && mkdir -p "$T/copy/site" && echo x >"$T/copy/site/x"
-expect_fail "from-vm: an ignored file (site/)" fv
-fvset && mkdir -p "$T/copy/.signing" && echo x >"$T/copy/.signing/key"
-expect_fail "from-vm: an ignored file (.signing/)" fv
-fvset && mkdir -p "$T/copy/out/sub"
-expect_fail "from-vm: out/ not a build" fv
-fvset && echo m >"$T/copy/out/manifest"
-expect_fail "from-vm: a manifest from the VM" fv
-fvset && rm -rf "$T/copy/out"
-expect_fail "from-vm: no out/" fv
-fvset && mkdir "$T/fresh/out"
-expect_fail "from-vm: out/ here already" fv
-# the copy's own .git is never trusted: a change committed there still shows, and a command its
-# configuration names never runs
-fvset && echo 'echo forged' >"$T/copy/scripts/summary.sh" && gitq -C "$T/copy" commit -qam forged
-expect_fail "from-vm: a change the VM committed in its own .git" fv
-fvset && gitq -C "$T/copy" config core.fsmonitor "touch $T/fsmonitor-ran"
-fv >/dev/null 2>&1
-expect_eq "from-vm: the copy's git configuration is never read" "$(exists "$T/fsmonitor-ran")" no
-fvset && touch "$T/copy/$(printf 'x\n::error::y')"
-err=$(fv 2>&1 >/dev/null)
-expect_eq "from-vm: a name the VM chose stays on the script's own line" "$(wc -l <<<"$err" | tr -d ' ') ${err:0:11}" "1 from-vm.sh:"
+# ghrepo <repo> <branch> <file> <word>...: a commit per word on <branch> of $T/gh/<repo>.git, each
+# writing it to <file>; prints the commits, one per line
+ghrepo() {
+	local repo=$1 branch=$2 file=$3 w d="$T/ghw/$1"
+	shift 3
+	if [[ ! -d $d ]]; then
+		gitq init -q "$d"
+		gitq -C "$d" checkout -q -b "$branch"
+	else
+		gitq -C "$d" checkout -q -B "$branch"
+	fi
+	mkdir -p "$d/$(dirname "$file")"
+	for w in "$@"; do
+		echo "$w" >"$d/$file"
+		gitq -C "$d" add -A
+		gitq -C "$d" commit -qm "$w"
+		git -C "$d" rev-parse HEAD
+	done
+	rm -rf "$T/gh/$repo.git"
+	mkdir -p "$T/gh/$(dirname "$repo")"
+	gitq clone -q --bare "$d" "$T/gh/$repo.git"
+}
+rm -rf "$T/ghw" "$T/gh"
+# Org/plugins: br-alpha holds commits one and two, branch other (from two) a third
+mapfile -t c < <(ghrepo Org/plugins br-alpha net/alpha/Makefile one two)
+c_one=${c[0]}
+c_three=$(ghrepo Org/plugins other net/alpha/Makefile three)
+# LegoTypes/plugins: master holds m-one and m-two, branch side (from m-two) m-three
+mapfile -t c < <(ghrepo LegoTypes/plugins master Mk/plugins.mk m-one m-two)
+m_one=${c[0]}
+m_side=$(ghrepo LegoTypes/plugins side Mk/plugins.mk m-three)
+# served with master as its default branch (a bare clone keeps every branch)
+gitq -C "$T/ghw/LegoTypes/plugins" checkout -q master
+rm -rf "$T/gh/LegoTypes/plugins.git" && gitq clone -q --bare "$T/ghw/LegoTypes/plugins" "$T/gh/LegoTypes/plugins.git"
+# freshrepo: $T/fresh, a checkout of this repository whose vendor/v last changed in $v_changed,
+# at a later commit $v_head
+freshrepo() {
+	rm -rf "$T/fresh"
+	mkdir -p "$T/fresh/vendor/v"
+	gitq init -q "$T/fresh"
+	printf 'PLUGIN_NAME= v\n' >"$T/fresh/vendor/v/Makefile"
+	gitq -C "$T/fresh" add -A && gitq -C "$T/fresh" commit -qm vendor
+	v_changed=$(git -C "$T/fresh" rev-parse HEAD)
+	echo other >"$T/fresh/README" && gitq -C "$T/fresh" add -A && gitq -C "$T/fresh" commit -qm other
+	v_head=$(git -C "$T/fresh" rev-parse HEAD)
+}
 
 # --- plugin-source.sh: the plugin's directory at the approved commit -----------------------------
-# a GitHub stand-in: https://github.com/<repo>.git is $T/gh/<repo>.git (url.insteadOf), branch
-# br-alpha holds commits one and two, branch other a third
-rm -rf "$T/ghw" "$T/gh"
-gitq init -q "$T/ghw"
-mkdir -p "$T/ghw/net/alpha"
-echo one >"$T/ghw/net/alpha/Makefile" && gitq -C "$T/ghw" add -A && gitq -C "$T/ghw" commit -qm one
-c_one=$(git -C "$T/ghw" rev-parse HEAD)
-echo two >"$T/ghw/net/alpha/Makefile" && gitq -C "$T/ghw" commit -qam two
-gitq -C "$T/ghw" branch -q -m br-alpha
-gitq -C "$T/ghw" checkout -q -b other
-echo three >"$T/ghw/net/alpha/Makefile" && gitq -C "$T/ghw" commit -qam three
-c_three=$(git -C "$T/ghw" rev-parse HEAD)
-mkdir -p "$T/gh/Org"
-gitq clone -q --bare "$T/ghw" "$T/gh/Org/plugins.git"
 conf 'os-alpha   Org/plugins br-alpha net/alpha yes' 'os-vendor  .           main     vendor/v  yes'
 # ps <dir> <commit> <args>: plugin-source.sh in <dir>
-ps() {
-	(cd "$1" && GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=1 \
-		GIT_CONFIG_KEY_0="url.file://$T/gh/.insteadOf" GIT_CONFIG_VALUE_0=https://github.com/ \
-		PACKAGES_CONF="$T/packages.conf" COMMIT="$2" bash "$root/scripts/plugin-source.sh" "${@:3}")
-}
+ps() { (cd "$1" && ghenv env PACKAGES_CONF="$T/packages.conf" COMMIT="$2" bash "$root/scripts/plugin-source.sh" "${@:3}"); }
 rm -rf "$T/src"
 expect_eq "plugin-source: prints the plugin's directory" "$(ps "$T" "$c_one" os-alpha "$T/src" 2>/dev/null)" "$T/src/net/alpha"
 expect_eq "plugin-source: at the commit, not the branch head" "$(cat "$T/src/net/alpha/Makefile")" one
@@ -1732,12 +1768,75 @@ expect_fail "plugin-source: a commit the repository does not have" ps "$T" "$(pr
 rm -rf "$T/src"
 expect_fail "plugin-source: an abbreviated commit" ps "$T" "${c_one:0:9}" os-alpha "$T/src"
 expect_fail "plugin-source: usage" ps "$T" "$c_one" os-alpha
-fvset
-fresh_head=$(git -C "$T/fresh" rev-parse HEAD)
+freshrepo
 expect_eq "plugin-source: this repository's package is this checkout's directory" \
-	"$(ps "$T/fresh" "$fresh_head" os-vendor "$T/src" 2>/dev/null)" vendor/v
+	"$(ps "$T/fresh" "$v_head" os-vendor "$T/src" 2>/dev/null)" vendor/v
 expect_eq "plugin-source: and clones nothing" "$(exists "$T/src")" no
 expect_fail "plugin-source: this checkout is not at the commit" ps "$T/fresh" "$c_one" os-vendor "$T/src"
+
+# --- provenance.sh: the release notes' lines, from trusted inputs --------------------------------
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
+# pv <dir> <package> <commit>: provenance.sh in <dir> on $od into $T/rev, the upstream PHP and
+# Python from PV_PHP and PV_PY (default 85 and 313)
+pv() {
+	(cd "$1" && ghenv env PACKAGES_CONF="$T/packages.conf" REPO_CONF="$T/repo.conf" COMMIT="$3" \
+		UPSTREAM_PHP="${PV_PHP-85}" UPSTREAM_PYTHON="${PV_PY-313}" GITHUB_REPOSITORY=Org/repo \
+		bash "$root/scripts/provenance.sh" "$2" "$od" "$T/rev")
+}
+# pvwith <VAR=value> <pv arguments>: pv with PV_PHP or PV_PY set so
+pvwith() {
+	local "$1"
+	pv "${@:2}"
+}
+# a plugin: the VM's source line is never read
+odset && printf 'Built from somewhere else entirely.\n' >"$od/source"
+rm -rf "$T/rev"
+pv "$T" os-alpha "$c_one" >/dev/null 2>&1 || bad "provenance: a plugin exited non-zero"
+expect_eq "provenance: a plugin's source line from packages.conf and the commit" "$(cat "$T/rev/source")" \
+	"Built from Org/plugins, branch br-alpha, commit $c_one."
+expect_eq "provenance: ABI and series from repo.conf, PHP and Python from upstream.sh, FreeBSD as the VM reported it" \
+	"$(cat "$T/rev/build")" $'abi: FreeBSD:15:amd64\nseries: 26.7\nfreebsd: 15.1-RELEASE-p3 (reported by the build VM)\nphp: 85\npython: 313'
+expect_eq "provenance: review/ holds the two files" "$(names "$T/rev")" "build source "
+expect_fail "provenance: review/ exists already" pv "$T" os-alpha "$c_one"
+# the VM's build lines must agree with repo.conf and with upstream.sh run again
+for v in 'abi: FreeBSD:16:amd64' 'series: 27.1'; do
+	odset && sed -i.bak "s/^${v%%:*}: .*/$v/" "$od/build" && rm "$od/build.bak"
+	rm -rf "$T/rev"
+	expect_fail "provenance: the VM built for another ${v%%:*}" pv "$T" os-alpha "$c_one"
+done
+odset
+for v in PV_PHP=84 PV_PY=312 PV_PHP= PV_PY=; do
+	rm -rf "$T/rev"
+	expect_fail "provenance: upstream.sh now says otherwise ($v)" pvwith "$v" "$T" os-alpha "$c_one"
+done
+rm -rf "$T/rev"
+expect_fail "provenance: an abbreviated commit" pv "$T" os-alpha "${c_one:0:9}"
+odset && touch "$od/extra"
+rm -rf "$T/rev"
+expect_fail "provenance: not a build" pv "$T" os-alpha "$c_one"
+odset && sed -i.bak 's/^abi: .*/abi: FreeBSD:16:amd64/' "$od/build" && rm "$od/build.bak"
+rm -rf "$T/rev"
+err=$(pv "$T" os-alpha "$c_one" 2>&1 >/dev/null)
+expect_eq "provenance: a refusal is one line of its own" "$(wc -l <<<"$err" | tr -d ' ') ${err:0:14}" "1 provenance.sh:"
+# this repository's package: the last change to its directory from this checkout, the plugins
+# master commit the VM reported only once it is a commit of LegoTypes/plugins master
+freshrepo
+vsrcline() { printf 'Built from Org/repo, vendor/v, commit %s (workflow run at %s), in LegoTypes/plugins master %s.\n' "$@"; }
+odset os-vendor && vsrcline "$ok" "$v_head" "$m_one" >"$od/source"
+rm -rf "$T/rev"
+pv "$T/fresh" os-vendor "$v_head" >/dev/null 2>&1 || bad "provenance: this repository's package exited non-zero"
+expect_eq "provenance: this repository's source line: this checkout's last change, the plugins master commit" \
+	"$(cat "$T/rev/source" 2>/dev/null)" "Built from Org/repo, vendor/v, commit $v_changed (workflow run at $v_head), in LegoTypes/plugins master $m_one."
+for bad_line in "$(vsrcline "$ok" "$v_head" "$m_side")" "$(vsrcline "$ok" "$v_head" "${m_one:0:9}")" \
+	"$(vsrcline "$ok" "$v_head" "$(printf 'e%.0s' {1..40})")" "$(vsrcline "$ok" "$v_changed" "$m_one")" \
+	"Built from Org/repo, vendor/v, in LegoTypes/plugins master $m_one."; do
+	odset os-vendor && printf '%s\n' "$bad_line" >"$od/source"
+	rm -rf "$T/rev"
+	expect_fail "provenance: refuses the VM's line [${bad_line:0:60}...${bad_line: -50}]" pv "$T/fresh" os-vendor "$v_head"
+done
+odset os-vendor && vsrcline "$ok" "$v_changed" "$m_one" >"$od/source"
+rm -rf "$T/rev"
+expect_fail "provenance: this checkout is not at the commit" pv "$T/fresh" os-vendor "$v_changed"
 
 # --- payload.sh: verify-payload.sh on a build ---------------------------------------------
 vreset
@@ -1783,19 +1882,22 @@ outside() {
 }
 conf 'os-alpha   Org/plugins br-alpha net/alpha yes'
 reset_stub
-so="$T/so"
-# soset [<vpkg filter>]: $so, a build of net/alpha as the build job holds it after manifest.sh
+so="$T/so" sr="$T/sr"
+# soset [<vpkg filter>]: $so, a build of net/alpha as the review job downloads it (its source and
+# build lines the VM's own), and $sr, the review job's source, build and manifest
 soset() {
 	vsrc && vstage && vpkg "$@"
-	rm -rf "$so" && mkdir -p "$so"
+	rm -rf "$so" "$sr" && mkdir -p "$so" "$sr"
 	cp "$vp/alpha.pkg" "$so/os-alpha-1.0.pkg"
-	printf 'Built from Org/plugins, branch br-alpha, commit %s.\n' "$commit" >"$so/source"
+	printf 'Built from the VM, which no one reads.\n' >"$so/source"
 	printf 'abi: FreeBSD:15:amd64\nseries: 26.7\nfreebsd: 15.1-RELEASE-p3\nphp: 85\npython: 313\n' >"$so/build"
-	printf 'built os-alpha-1.0.pkg %s\ncommit %s\n' "$(sum "$so/os-alpha-1.0.pkg")" "$commit" >"$so/manifest"
+	printf 'Built from Org/plugins, branch br-alpha, commit %s.\n' "$commit" >"$sr/source"
+	printf 'abi: FreeBSD:15:amd64\nseries: 26.7\nfreebsd: 15.1-RELEASE-p3 (reported by the build VM)\nphp: 85\npython: 313\n' >"$sr/build"
+	printf 'built os-alpha-1.0.pkg %s\ncommit %s\n' "$(sum "$so/os-alpha-1.0.pkg")" "$commit" >"$sr/manifest"
 }
 smr() {
 	PACKAGES_CONF="$T/packages.conf" REPO_CONF="$T/repo.conf" COMMIT="${SCOMMIT-$commit}" PLUGIN_DIR="$vp/net/alpha" \
-		bash "$root/scripts/summary.sh" os-alpha "$so"
+		bash "$root/scripts/summary.sh" os-alpha "$so" "$sr"
 }
 # the post-install script holds backtick runs, one a line of its own, and a marker for "package text"
 soset '.scripts["post-install"] = "echo ``` and ```` PKGTEXT\n````\nexit 0"'
@@ -1810,9 +1912,10 @@ expect_eq "summary: a fence longer than the longest backtick run inside" "$(grep
 expect_eq "summary: the commit, outside a fence" "$(grep -c "\`$commit\`" <<<"$o")" 1
 expect_eq "summary: the built file and its sha256" "$(grep -cx "sha256 $(sum "$so/os-alpha-1.0.pkg")" <<<"$s")" 1
 expect_eq "summary: the manifest" "$(grep -cx "built os-alpha-1.0.pkg $(sum "$so/os-alpha-1.0.pkg")" <<<"$s")" 1
-expect_eq "summary: the source line" "$(grep -cxF "$(cat "$so/source")" <<<"$s")" 1
+expect_eq "summary: the review job's source line" "$(grep -cxF "$(cat "$sr/source")" <<<"$s")" 1
+expect_eq "summary: never the VM's" "$(grep -c 'Built from the VM' <<<"$s")" 0
 expect_eq "summary: the version file" "$(grep -c '"product_version": "1.0"' <<<"$s")" 1
-expect_eq "summary: the build environment" "$(grep -cx 'freebsd: 15.1-RELEASE-p3' <<<"$s")" 1
+expect_eq "summary: the review job's build lines" "$(grep -cx 'freebsd: 15.1-RELEASE-p3 (reported by the build VM)' <<<"$s")" 1
 expect_eq "summary: the first release" "$(grep -c '^No earlier release of os-alpha: nothing to compare\.$' <<<"$o")" 1
 # a newer build than a published one whose post-install script differs
 vpkg
@@ -1832,7 +1935,7 @@ soset
 printf '````\n`````` PKGTEXT\n' >"$vu/opnsense/version/alpha"
 vrepack
 cp "$vp/alpha.pkg" "$so/os-alpha-1.0.pkg"
-printf 'built os-alpha-1.0.pkg %s\ncommit %s\n' "$(sum "$so/os-alpha-1.0.pkg")" "$commit" >"$so/manifest"
+printf 'built os-alpha-1.0.pkg %s\ncommit %s\n' "$(sum "$so/os-alpha-1.0.pkg")" "$commit" >"$sr/manifest"
 s=$(smr 2>/dev/null) || bad "summary, a failed payload check: exited non-zero"
 o=$(outside <<<"$s")
 expect_eq "summary: a failed payload check is reported" "$(grep -c '^### Payload check: FAILED$' <<<"$o")" 1
@@ -1855,7 +1958,11 @@ unset SCOMMIT
 touch "$so/extra"
 expect_fail "summary: not a build" smr
 rm "$so/extra"
-expect_fail "summary: usage" bash "$root/scripts/summary.sh" os-alpha
+rm "$sr/manifest"
+expect_fail "summary: no manifest from the review job" smr
+soset && rm "$sr/source"
+expect_fail "summary: no source line from the review job" smr
+expect_fail "summary: usage" bash "$root/scripts/summary.sh" os-alpha "$so"
 
 echo "passed $pass, failed $failed"
 [[ $failed -eq 0 ]]

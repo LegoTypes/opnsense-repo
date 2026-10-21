@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # out-dir.sh <package> <dir>
-# Check a build's output, which the build VM wrote, before anything reads it: <dir> holds
-# exactly <package>-<version>.pkg, source and build, and manifest once manifest.sh has
-# written it, each a regular file (not a symlink). <version> is [0-9][0-9A-Za-z._,]*, so the
-# tag release.sh derives from the file name is one plain word; source is one line of
-# printable ASCII (the release notes start with it); build is the five lines
-# build-package.sh writes, "abi:", "series:", "freebsd:", "php:" and "python:", each value of
-# [A-Za-z0-9._:-]. Prints the package's path. A name in an error is quoted (printf %q), so
-# no name the VM chose reaches the log as a line of its own.
+# Check a build's output, which the build VM wrote, before anything reads it or uploads it
+# (upload-artifact follows symlinks): <dir> holds exactly <package>-<version>.pkg, source and
+# build, each a regular file (not a symlink). <version> is [0-9][0-9A-Za-z._,]*, so the tag
+# release.sh derives from the file name is one plain word; source is one line of printable
+# ASCII; build is the five lines build-package.sh writes, "abi:", "series:", "freebsd:",
+# "php:" and "python:", each value of [A-Za-z0-9._:-] (provenance.sh reads both, and composes
+# the release notes' own lines). Prints the package's path. A name in an error is quoted
+# (printf %q), so no name the VM chose reaches the log as a line of its own.
 set -euo pipefail
 export LC_ALL=C
 
@@ -28,7 +28,7 @@ for f in "$dir"/*; do
 	b=${f##*/}
 	[[ -f $f && ! -L $f ]] || die "$(q "$b") in $(q "$dir") is not a regular file"
 	case $b in
-	source | build | manifest) ;;
+	source | build) ;;
 	*)
 		[[ $b =~ ^$pkg-[0-9][0-9A-Za-z._,]*\.pkg$ ]] || die "$(q "$dir") holds $(q "$b"), not a build of $pkg"
 		[[ -z $found ]] || die "$(q "$dir") holds more than one $pkg package"
