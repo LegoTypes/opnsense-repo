@@ -138,7 +138,14 @@ check('an outage (HTTP 503) is information', $answers(['stamp.sig' => $http(503)
 check('an outage (HTTP 500) is information', $info($answers(['stamp' => $http(500)])));
 check('a 404 beside an outage is a mismatch', $mismatch($answers(['stamp' => $http(404), 'stamp.sig' => $http(503)])));
 
-$big = ['file' => 'stamp.pub', 'errno' => CURLE_FILESIZE_EXCEEDED, 'error' => 'Maximum file size exceeded'];
+/* the library is pure: curl's "file size exceeded" is its own constant, equal to curl's */
+check('the size cap error is curl\'s file size exceeded (63)', LEGOTYPES_CURLE_FILESIZE_EXCEEDED === 63
+    && (!defined('CURLE_FILESIZE_EXCEEDED') || constant('CURLE_FILESIZE_EXCEEDED') === LEGOTYPES_CURLE_FILESIZE_EXCEEDED));
+$libText = (string)file_get_contents(__DIR__ . '/../src/opnsense/scripts/LegoTypes/lib.php');
+check('lib.php names no curl constant or function', preg_match('/(?<![A-Z_])CURL[A-Z]*_|\bcurl_/', $libText) === 0);
+check('lib.php keeps its doc lines within 120 characters', array_filter(explode("\n", $libText),
+    fn (string $l): bool => preg_match('/^\s*(\/\*\*|\*)/', $l) === 1 && strlen($l) > 120) === []);
+$big = ['file' => 'stamp.pub', 'errno' => LEGOTYPES_CURLE_FILESIZE_EXCEEDED, 'error' => 'Maximum file size exceeded'];
 $r = $fetched(['stamp' => $ok($stamp), 'stamp.sig' => $ok($sig)], $big);
 check('a stamp file over the cap is a mismatch', $mismatch($r) && str_contains($r[0][1], 'stamp.pub is too large'));
 check('an unreachable site is information',
@@ -152,6 +159,48 @@ check('a 404 before a fetch timed out is a mismatch',
     $mismatch($fetched(['stamp' => $http(404)], ['file' => 'stamp.sig', 'errno' => 28, 'error' => 'Operation timed out'])));
 $r = $fetched(['stamp' => $ok($stamp), 'stamp.pub' => $ok($pub)], null);
 check('a file with no answer and no transport failure is a mismatch', $mismatch($r) && str_contains($r[0][1], 'stamp.sig: no answer'));
+
+/*
+ * a signature that does not verify is fetched once more before it is a mismatch: a deploy can land
+ * between the fetches (a new stamp beside the old stamp.sig); nothing else is fetched again
+ */
+$calls = 0;
+$fetches = function (array ...$answers) use (&$calls): callable {
+    $calls = 0;
+    return function () use (&$calls, $answers): array {
+        $calls++;
+        return [$answers[min($calls, count($answers)) - 1], null];
+    };
+};
+$newer = "published: 2026-10-18T18:00:00Z\nrun: 18734512399\ntree: FreeBSD:15:amd64/26.7\n";
+$torn = ['stamp' => $ok($newer), 'stamp.sig' => $ok($sig), 'stamp.pub' => $ok($pub)];
+$deployed = ['stamp' => $ok($newer), 'stamp.sig' => $ok($sign($newer, $key)), 'stamp.pub' => $ok($pub)];
+$r = legotypes_stamp_check($fetches($torn, $deployed), [$fpr], $at + 3600, $tree);
+check('a deploy between the fetches: fetched again, the new stamp',
+    $r === [['INFO', 'catalogue published 2026-10-18T18:00:00Z (0 days ago)']] && $calls === 2);
+$r = legotypes_stamp_check($fetches($torn, $torn), [$fpr], $at + 3600, $tree);
+check('a signature that still does not verify is a mismatch',
+    $r === [['MISMATCH', 'the catalogue stamp signature does not verify']] && $calls === 2);
+$r = legotypes_stamp_check($fetches($valid), [$fpr], $at, $tree);
+check('a valid stamp is fetched once', $r === [['INFO', 'catalogue published 2026-10-18T17:04:05Z (0 days ago)']]
+    && $calls === 1);
+$r = legotypes_stamp_check($fetches(array_replace($valid, ['stamp' => $http(404)]), $valid), [$fpr], $at, $tree);
+check('a 404 is not fetched again', $mismatch($r) && str_contains($r[0][1], 'stamp: HTTP 404') && $calls === 1);
+$r = legotypes_stamp_check($fetches($valid, $valid), [$otherFpr], $at, $tree);
+check('an untrusted key is not fetched again', $mismatch($r) && str_contains($r[0][1], 'not a trusted') && $calls === 1);
+$r = legotypes_stamp_check($fetches($torn, array_replace($valid, ['stamp.sig' => $http(503)])), [$fpr], $at, $tree);
+check('fetched again during an outage: information, as any outage',
+    $r === [['INFO', 'could not fetch the stamp (HTTP 503 for stamp.sig)']] && $calls === 2);
+
+/* the output: mismatches, information, and the fit line only when nothing mismatches, the stamp included */
+check('the report with a mismatch has no fit line', legotypes_report(['the catalogue stamp signature does not verify'],
+    ['os-a 1.0: update available (1.1)'], '26.7', 'FreeBSD:15:amd64')
+    === ['MISMATCH: the catalogue stamp signature does not verify', 'INFO: os-a 1.0: update available (1.1)']);
+check('the report with no mismatch ends with the fit line', legotypes_report([], ['catalogue published x (0 days ago)'],
+    '26.7', 'FreeBSD:15:amd64')
+    === ['INFO: catalogue published x (0 days ago)', 'LegoTypes packages fit series 26.7 on FreeBSD:15:amd64']);
+check('the report lists every mismatch before the information', legotypes_report(['a', 'b'], ['c'], '26.7', 'X')
+    === ['MISMATCH: a', 'MISMATCH: b', 'INFO: c']);
 
 $signed = fn (string $s): array => $sf($s, $sign($s, $key), $pub, [$fpr], $at);
 check('a stamp with no run', $mismatch($signed("published: 2026-10-18T17:04:05Z\ntree: FreeBSD:15:amd64/26.7\n")));

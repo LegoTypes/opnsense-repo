@@ -30,7 +30,8 @@ function legotypes_conf_for(string $sample, string $series): string
 /**
  * Do the LegoTypes packages fit this firewall?
  *
- * @param array<string, array{version: string, repo: string, abi: string, product_abi: ?string}> $packages every installed package
+ * @param array<string, array{version: string, repo: string, abi: string, product_abi: ?string}> $packages
+ *        every installed package
  * @param array<string, string> $remote the LegoTypes catalogue, name => version
  * @param callable(string, string): string $vercmp '<', '=' or '>'
  * @return array{mismatch: list<string>, info: list<string>}
@@ -68,6 +69,12 @@ const LEGOTYPES_STAMP_SKEW = 300;
 /** The largest stamp file fetched: the stamp, its signature and its key are each well under 4 KiB. */
 const LEGOTYPES_STAMP_MAX_BYTES = 65536;
 
+/** curl's error number for a body over its maximum file size (63), so this library needs no curl extension. */
+const LEGOTYPES_CURLE_FILESIZE_EXCEEDED = 63;
+
+/** The finding for a stamp whose signature does not verify with its trusted key. */
+const LEGOTYPES_STAMP_BAD_SIGNATURE = 'the catalogue stamp signature does not verify';
+
 /**
  * The repository's tree URL from its config, with ${ABI} resolved as pkg resolves it
  * (pkg config ABI) and no trailing slash; null when the config names no https url or
@@ -91,9 +98,9 @@ function legotypes_tree_url(string $conf, string $abi): ?string
  * a line `fingerprint: "<hex>"` (key in any case, optionally quoted, `:` or `=`, an
  * optional `;` or `,`) counts only in a file with a `function: "sha256"` line, the last
  * one in a file wins, and it counts only as 64 lower-case hex digits (pkg compares it
- * exactly with the lower-case sha256 of the key, so nothing else matches). Revoked files are read loosely, so anything pkg might
- * revoke is revoked here: every run of 64 hex digits in them, in either case, whatever
- * UCL spelling surrounds it.
+ * exactly with the lower-case sha256 of the key, so nothing else matches). Revoked files
+ * are read loosely, so anything pkg might revoke is revoked here: every run of 64 hex
+ * digits in them, in either case, whatever UCL spelling surrounds it.
  *
  * @param list<string> $trusted the contents of each file in fingerprints/LegoTypes/trusted
  * @param list<string> $revoked the contents of each file in fingerprints/LegoTypes/revoked
@@ -131,7 +138,7 @@ function legotypes_fingerprints(array $trusted, array $revoked): array
  * fetched; $transport, when not null, is the curl failure that stopped the fetch (the file
  * it stopped at, curl's error number and message). Availability is information, anything
  * else short of a valid stamp is a mismatch (Monit alerts):
- * - MISMATCH: a file over LEGOTYPES_STAMP_MAX_BYTES (curl's CURLE_FILESIZE_EXCEEDED);
+ * - MISMATCH: a file over LEGOTYPES_STAMP_MAX_BYTES (LEGOTYPES_CURLE_FILESIZE_EXCEEDED);
  *   an answer other than 200 and 5xx (404, a redirect, which is not followed, 403, 410 ...)
  *   for any file fetched; a file neither answered nor stopped at by a transport failure.
  * - INFO "could not fetch the stamp": any other transport failure (DNS, connection
@@ -151,7 +158,7 @@ function legotypes_fingerprints(array $trusted, array $revoked): array
  */
 function legotypes_stamp_findings(array $files, ?array $transport, array $trusted, int $now, string $tree): array
 {
-    if ($transport !== null && $transport['errno'] === CURLE_FILESIZE_EXCEEDED) {
+    if ($transport !== null && $transport['errno'] === LEGOTYPES_CURLE_FILESIZE_EXCEEDED) {
         return [['MISMATCH', "the catalogue stamp file {$transport['file']} is too large (over "
             . LEGOTYPES_STAMP_MAX_BYTES . ' bytes)']];
     }
@@ -174,9 +181,10 @@ function legotypes_stamp_findings(array $files, ?array $transport, array $truste
     if ($refused !== []) {
         return [['MISMATCH', 'the repository answers without a catalogue stamp (' . implode(', ', $refused) . ')']];
     }
+    /* past the refusals, a missing file means a transport failure stopped the fetch */
     $unreachable = $transport !== null ? $transport['error'] : $outage;
-    if ($unreachable !== null || !isset($files['stamp'], $files['stamp.sig'], $files['stamp.pub'])) {
-        return [['INFO', 'could not fetch the stamp (' . ($unreachable ?? 'no answer') . ')']];
+    if ($unreachable !== null) {
+        return [['INFO', "could not fetch the stamp ({$unreachable})"]];
     }
     $stamp = $files['stamp']['body'];
     $sig = $files['stamp.sig']['body'];
@@ -186,7 +194,7 @@ function legotypes_stamp_findings(array $files, ?array $transport, array $truste
     }
     $key = openssl_pkey_get_public($pub);
     if ($key === false || openssl_verify(hash('sha256', $stamp), $sig, $key, OPENSSL_ALGO_SHA256) !== 1) {
-        return [['MISMATCH', 'the catalogue stamp signature does not verify']];
+        return [['MISMATCH', LEGOTYPES_STAMP_BAD_SIGNATURE]];
     }
     $line = '/\Apublished: ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)\nrun: [0-9]+\ntree: ([^\n]*)\n\z/';
     $utc = new DateTimeZone('UTC');
@@ -205,4 +213,52 @@ function legotypes_stamp_findings(array $files, ?array $transport, array $truste
     }
     $days = intdiv(max(0, $now - $at), 86400);
     return [['INFO', "catalogue published {$m[1]} ({$days} " . ($days === 1 ? 'day' : 'days') . ' ago)']];
+}
+
+/**
+ * The stamp's findings from one fetch of its three files, or from a second fetch when the
+ * first reads as a signature that does not verify: a deploy can land between two of the
+ * fetches (a new stamp beside the previous stamp.sig), so such a signature is a mismatch only
+ * when the files fetched again still give it. Nothing else is fetched again.
+ *
+ * @param callable(): array{
+ *     0: array<string, array{status: int, body: string}>,
+ *     1: ?array{file: string, errno: int, error: string}
+ * } $fetch one fetch of the three files, as legotypes_stamp_findings() takes them
+ * @param list<string> $trusted the trusted fingerprints (legotypes_fingerprints)
+ * @param string $tree the <ABI>/<series> the stamp is fetched for
+ * @return list<array{0: 'INFO'|'MISMATCH', 1: string}>
+ */
+function legotypes_stamp_check(callable $fetch, array $trusted, int $now, string $tree): array
+{
+    [$files, $transport] = $fetch();
+    $r = legotypes_stamp_findings($files, $transport, $trusted, $now, $tree);
+    if ($r === [['MISMATCH', LEGOTYPES_STAMP_BAD_SIGNATURE]]) {
+        [$files, $transport] = $fetch();
+        $r = legotypes_stamp_findings($files, $transport, $trusted, $now, $tree);
+    }
+    return $r;
+}
+
+/**
+ * The check's output lines: each mismatch, then each piece of information, and last the line
+ * saying the packages fit, only when nothing mismatches at all (the stamp included).
+ *
+ * @param list<string> $mismatch
+ * @param list<string> $info
+ * @return list<string>
+ */
+function legotypes_report(array $mismatch, array $info, string $series, string $abi): array
+{
+    $lines = [];
+    foreach ($mismatch as $m) {
+        $lines[] = "MISMATCH: {$m}";
+    }
+    foreach ($info as $i) {
+        $lines[] = "INFO: {$i}";
+    }
+    if ($mismatch === []) {
+        $lines[] = "LegoTypes packages fit series {$series} on {$abi}";
+    }
+    return $lines;
 }

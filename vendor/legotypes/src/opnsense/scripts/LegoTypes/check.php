@@ -13,9 +13,10 @@ declare(strict_types=1);
  * package, and lists available updates and hand-installed packages. Then reads the
  * repository's signed catalogue stamp: when the catalogue was published; a mismatch if
  * the site answers without a valid stamp (404, any answer but 200 and 5xx, a forged or
- * malformed stamp); information only if the site cannot be reached or has an outage.
- * Prints its findings; exits 1 on a mismatch (Monit alerts when that starts and when it
- * ends), 0 otherwise.
+ * malformed stamp); information only if the site cannot be reached or has an outage. A
+ * signature that does not verify is fetched once more first, as a deploy can land between
+ * the fetches. Prints its findings, and that the packages fit only when nothing mismatches;
+ * exits 1 on a mismatch (Monit alerts when that starts and when it ends), 0 otherwise.
  */
 
 require_once __DIR__ . '/lib.php';
@@ -119,7 +120,6 @@ $vercmp = fn (string $a, string $b): string =>
     trim(lt_run('/usr/local/sbin/pkg version -t ' . escapeshellarg($a) . ' ' . escapeshellarg($b)));
 
 $r = legotypes_findings($series, $abi, $urlSeries, $packages, $remote, $vercmp);
-$fit = $r['mismatch'] === [];
 
 /* the stamp of the tree the repository config names (a config naming none is a mismatch above) */
 if ($confText !== null && $urlSeries !== null) {
@@ -131,21 +131,14 @@ if ($confText !== null && $urlSeries !== null) {
         $fingerprints = '/usr/local/etc/pkg/fingerprints/LegoTypes';
         $trusted = legotypes_fingerprints(lt_fingerprint_files("{$fingerprints}/trusted"),
             lt_fingerprint_files("{$fingerprints}/revoked"));
-        [$files, $transport] = lt_fetch_stamp($url);
-        $stamp = legotypes_stamp_findings($files, $transport, $trusted, time(), "{$abi}/{$urlSeries}");
+        $stamp = legotypes_stamp_check(fn (): array => lt_fetch_stamp($url), $trusted, time(), "{$abi}/{$urlSeries}");
     }
     foreach ($stamp as [$level, $text]) {
         $r[$level === 'MISMATCH' ? 'mismatch' : 'info'][] = $text;
     }
 }
 
-foreach ($r['mismatch'] as $m) {
-    echo "MISMATCH: {$m}\n";
-}
-foreach ($r['info'] as $i) {
-    echo "INFO: {$i}\n";
-}
-if ($fit) {
-    echo "LegoTypes packages fit series {$series} on {$abi}\n";
+foreach (legotypes_report($r['mismatch'], $r['info'], $series, $abi) as $line) {
+    echo "{$line}\n";
 }
 exit($r['mismatch'] === [] ? 0 : 1);
