@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 cayossarian
 # provenance.sh <package> <out dir> <review dir>
 # In the review job: write <review dir>/source and <review dir>/build, the lines the release
 # notes carry, from trusted inputs instead of the build VM's out/source and out/build, which

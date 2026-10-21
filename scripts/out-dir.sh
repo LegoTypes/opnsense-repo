@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 cayossarian
 # out-dir.sh <package> <dir>
 # Check a build's output, which the build VM wrote, before anything reads it or uploads it
 # (upload-artifact follows symlinks): <dir> holds exactly <package>-<version>.pkg, source and

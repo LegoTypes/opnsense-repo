@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 cayossarian
 # manifest.sh <package> <out dir>
 # Write <out dir>/manifest, what the owner reads before approving a publish and
 # what carry-forward.sh must reproduce at signing time. One entry per line, sorted

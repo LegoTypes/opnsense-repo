@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 cayossarian
 # plugin-source.sh <package> <dest>
 # The package's directory at COMMIT (the approved commit, 40 lower-case hex digits), for
 # verify-payload.sh to read; nothing in it is run. Prints the directory.

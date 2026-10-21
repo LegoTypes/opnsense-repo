@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 cayossarian
 # summary.sh <package> <out dir> <review dir>
 # Markdown for the review job's summary ($GITHUB_STEP_SUMMARY), what the owner reads before
 # approving the sign job: first a fixed line saying this summary, under the review job, is the

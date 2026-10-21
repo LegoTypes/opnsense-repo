@@ -2576,5 +2576,16 @@ soset && rm "$sr/source"
 expect_fail "summary: no source line from the review job" smr
 expect_fail "summary: usage" bash "$root/scripts/summary.sh" os-alpha "$so"
 
+# --- copyright headers ---------------------------------------------------------------
+# every non-trivial file added since per-package publishing (6699843) carries the header as line 2,
+# after the shebang; no header anywhere names anyone else
+for f in scripts/carry-plan.sh scripts/manifest.sh scripts/out-dir.sh scripts/payload.sh scripts/pkg-tool.sh \
+	scripts/plugin-source.sh scripts/provenance.sh scripts/review-sums.sh scripts/summary.sh scripts/ubuntu-apt.sh \
+	scripts/verify-payload.sh tests/stub-apt/apt-get; do
+	expect_eq "$f: the copyright line after the shebang" "$(sed -n 2p "$root/$f")" "# Copyright (C) 2026 cayossarian"
+done
+expect_eq "every copyright header names cayossarian alone" \
+	"$(grep -rhE '^(#| \*) *Copyright' "$root/scripts" "$root/tests" "$root/vendor" "$root/.github" | grep -vxE '(#| \*) Copyright \(C\) 2026 cayossarian')" ""
+
 echo "passed $pass, failed $failed"
 [[ $failed -eq 0 ]]

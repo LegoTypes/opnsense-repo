@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 cayossarian
 # ubuntu-apt.sh <package>...
 # Install Ubuntu packages on the runner from the image's own Ubuntu archive only:
 # /etc/apt/sources.list.d/ubuntu.sources, whose Release files apt checks against Ubuntu's

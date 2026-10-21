@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 cayossarian
 # Build FreeBSD's pkg from source, for "pkg repo" on the runner (the sign job):
 #   bash scripts/pkg-tool.sh <dest dir>
 # installs <dest dir>/sbin/pkg and prints that path (everything else goes to stderr).

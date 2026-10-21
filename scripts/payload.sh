@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 cayossarian
 # payload.sh <package> <out dir> <plugin dir>
 # verify-payload.sh on the build in <out dir> (out-dir.sh) against <plugin dir>, the
 # plugin's directory at COMMIT (plugin-source.sh): the version is the built file's, which

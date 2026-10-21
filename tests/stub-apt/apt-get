@@ -1,4 +1,5 @@
 #!/bin/sh
+# Copyright (C) 2026 cayossarian
 # A stand-in for apt-get in the tests of pkg-tool.sh and ubuntu-apt.sh: installs nothing.
 # With APT_CALLS set, appends a line per call: its arguments, with the directory of
 # Dir::Etc::SourceParts=<dir> replaced by the number of entries it holds.

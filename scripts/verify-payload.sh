@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 cayossarian
 # verify-payload.sh <pkg> <plugin dir> <name> <version> <abi> <series> <commit>
 # Check, before a package is signed, that it holds exactly what Mk/plugins.mk install
 # makes of the plugin directory at the approved commit, without running Mk/: every

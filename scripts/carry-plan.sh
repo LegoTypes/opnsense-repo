@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 cayossarian
 # carry-plan.sh <built-package>
 # What carry-forward.sh will carry, one "carry" line per package and served tree:
 #   carry <ABI>/<series> <tag> <sha256 the release notes record> immutable=yes|no

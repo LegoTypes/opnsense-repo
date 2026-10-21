@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 cayossarian
 # review-sums.sh print|check <package> <out dir> <review dir>
 # What binds the files sign signs and release publishes to what the review job showed the
 # approver. <out dir> is the build (out-dir.sh), <review dir> exactly the review job's manifest,
