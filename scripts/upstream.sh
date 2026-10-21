@@ -67,7 +67,7 @@ tar -xf "$work/packagesite.pkg" -C "$work" packagesite.yaml packagesite.yaml.sig
 [[ -s $work/packagesite.yaml.sig && -s $work/packagesite.yaml.pub ]] || die "the $want catalogue's signature or key is empty"
 fingerprint=$(openssl dgst -sha256 -r "$work/packagesite.yaml.pub" | cut -d' ' -f1)
 [[ $fingerprint =~ ^[0-9a-f]{64}$ ]] || die "cannot fingerprint the $want catalogue's key"
-cat "$keys"/* 2>/dev/null | grep -qxF "fingerprint: \"$fingerprint\"" ||
+grep -qxF "fingerprint: \"$fingerprint\"" "$keys"/* 2>/dev/null ||
 	die "the $want catalogue is signed with a key (sha256 $fingerprint) that is no fingerprint in $keys"
 openssl dgst -sha256 -r "$work/packagesite.yaml" | cut -d' ' -f1 | tr -d '\n' |
 	openssl dgst -sha256 -verify "$work/packagesite.yaml.pub" -signature "$work/packagesite.yaml.sig" >/dev/null 2>&1 ||

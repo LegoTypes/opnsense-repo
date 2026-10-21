@@ -1081,8 +1081,19 @@ expect_fail "upstream: no fingerprint file" up
 expect_fail "upstream: an empty fingerprint file" up
 rm -rf "$T/upfp"
 expect_fail "upstream: no fingerprint directory" up
-expect_eq "upstream: the production script reads no environment variable for its key directory" \
-	"$(grep -c '^keys="\$here/../keys/upstream"$' "$root/scripts/upstream.sh") $(grep -E '^keys=|keys/upstream' "$root/scripts/upstream.sh" | grep -c '\$[{]\?[A-Z_]\+')" "1 0"
+# every keys= in the script (any indentation, any condition) must be the one literal line
+keyline() { echo "$(grep -o 'keys=' "$1" | wc -l | tr -d ' ') $(grep -c '^keys="\$here/../keys/upstream"$' "$1")"; }
+expect_eq "upstream: the production script's key directory is one literal line, no override" "$(keyline "$root/scripts/upstream.sh")" "1 1"
+{ cat "$root/scripts/upstream.sh"; echo '[[ -n ${X:-} ]] && keys=$X'; } >"$T/mutant.sh"
+expect_eq "upstream: the static check rejects an override" "$(keyline "$T/mutant.sh")" "2 1"
+sed 's|^keys=.*|[[ -n ${X:-} ]] \&\& keys=$X; keys="$here/../keys/upstream"|' "$root/scripts/upstream.sh" >"$T/mutant.sh"
+expect_eq "upstream: the static check rejects a conditional on the literal line" "$(keyline "$T/mutant.sh")" "2 0"
+# a match in the first of two fingerprint files, the second large: no SIGPIPE-driven failure
+mkdir -p "$T/upfp"
+printf 'function: "sha256"\nfingerprint: "%s"\n' "$(openssl dgst -sha256 -r "$T/pub.pem" | cut -d' ' -f1)" >"$T/upfp/a"
+head -c 3000000 /dev/zero | tr '\0' 'x' >"$T/upfp/b"
+site 26.7 "$(core 26.7.5 1501000 php85-curl py313-requests)"
+expect_eq "upstream: a match in the first of two fingerprint files" "$(up | grep '^CORE=')" "CORE=26.7.5"
 expect_eq "upstream: the vendored OPNsense fingerprint" "$(cat "$root"/keys/upstream/pkg.opnsense.org.20260608)" \
 	$'function: "sha256"\nfingerprint: "9f3b76ffef38fb6405595038b324b61043c9a2c375ae5c151d628508e9a845ce"'
 unset STUB_MIRROR STUB_MIRROR_URL UPSTREAM_MIRROR
