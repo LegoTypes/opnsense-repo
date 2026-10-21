@@ -13,7 +13,9 @@
 # STUB_PATH: the test harness's PATH, for openssl, perl, tar and zstd (sign-catalogue.sh
 # runs pkg with PATH=/usr/bin:/bin). For "repo": STUB_PKG_FEED, a line fed to <cmd> in
 # place of each digest; STUB_PKG_REPLY, the file <cmd>'s answer is written to;
-# STUB_PKG_BLOCK, a file the stub writes its pid to before it sleeps (a cancelled run).
+# STUB_PKG_BLOCK, a file the stub writes its pid to before it sleeps (a cancelled run);
+# STUB_PKG_TRUNCATE, set: the answer loses its last line (END) before it is read, as a
+# signing command that answered only in part.
 set -eu
 PATH=${STUB_PATH:-$PATH}
 if [ -n "${STUB_PKG_REFUSE:-}" ]; then
@@ -39,6 +41,9 @@ case "$1 $2" in
 			printf '%s\n' "$STUB_PKG_FEED" | "$@" >"$reply"
 		else
 			openssl dgst -sha256 -r "$work/$file" | cut -d' ' -f1 | "$@" >"$reply"
+		fi
+		if [ -n "${STUB_PKG_TRUNCATE:-}" ]; then
+			perl -0777 -i -pe 's/END\n?\z//' "$reply"
 		fi
 		W="$work" perl -0777 -ne '
 			/\ASIGNATURE\n(.*)\nCERT\n(.*)END\n?\z/s or die "stub pkg: malformed signing reply\n";

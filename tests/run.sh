@@ -719,6 +719,33 @@ expect_fail "manifest.sh without the approved commit" env -u COMMIT bash "$root/
 expect_fail "manifest.sh with a short commit" env COMMIT=abc123 bash "$root/scripts/manifest.sh" os-alpha "$T/mo"
 rm -f "$T/mo/os-alpha-1.1.pkg"
 expect_fail "manifest.sh without a built package" env COMMIT=$C40 bash "$S/manifest.sh" os-alpha "$T/mo"
+# two served trees (SERVE, a series change): the manifest lists what is carried into each, and
+# carry-forward against it fills both
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=27.1' 'SERVE=FreeBSD:15:amd64/26.7 FreeBSD:15:amd64/27.1'
+reset_stub
+rm -rf "$T/livesite"
+publish os-alpha-1.0 2026-01-01T00:00:00Z
+publish os-alpha-extra-2.0 2026-01-04T00:00:00Z
+publish os-vendor-1.0 2026-01-02T00:00:00Z
+publish os-vendor-1.0_1 2026-02-01T00:00:00Z
+printf 'Built.\n\nseries: 27.1\n\nsha256: %s\n' "$(sum "$STUB/assets/os-vendor-1.0_1/os-vendor-1.0_1.pkg")" >"$STUB/notes/os-vendor-1.0_1"
+live -s 26.7 os-alpha-1.0 os-alpha-extra-2.0 os-vendor-1.0
+live -s 27.1 os-vendor-1.0_1
+mf os-alpha || bad "manifest.sh with two served trees exited non-zero"
+expect_eq "manifest: two served trees, the frozen one keeping the built package's last release" "$(cat "$M")" \
+	"built os-alpha-1.1.pkg $(sum "$T/mo/os-alpha-1.1.pkg")
+carry FreeBSD:15:amd64/26.7 os-alpha-1.0 $(sum "$STUB/assets/os-alpha-1.0/os-alpha-1.0.pkg") immutable=no
+carry FreeBSD:15:amd64/26.7 os-alpha-extra-2.0 $(sum "$STUB/assets/os-alpha-extra-2.0/os-alpha-extra-2.0.pkg") immutable=no
+carry FreeBSD:15:amd64/26.7 os-vendor-1.0 $(sum "$STUB/assets/os-vendor-1.0/os-vendor-1.0.pkg") immutable=no
+carry FreeBSD:15:amd64/27.1 os-vendor-1.0_1 $(sum "$STUB/assets/os-vendor-1.0_1/os-vendor-1.0_1.pkg") immutable=no
+commit $C40"
+mfcfok "$M"
+expect_eq "manifest: carry-forward against it fills both trees" "$(names "$(tree 26.7)")| $(names "$(tree 27.1)")" \
+	"os-alpha-1.0.pkg os-alpha-extra-2.0.pkg os-vendor-1.0.pkg | os-vendor-1.0_1.pkg "
+LC_ALL=C sort -r "$M" >"$T/m.shuffled"
+mfcfok "$T/m.shuffled"
+grep -v '27\.1 ' "$M" >"$T/m.drop"
+expect_fail "manifest: a manifest without the new tree's line fails" mfcf "$T/m.drop"
 rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 
 # --- newest-release.sh ----------------------------------------------------------
@@ -826,6 +853,7 @@ expect_fail "build commit: checkout lands elsewhere" bp STUB_PKGS=os-alpha-1.1.p
 expect_fail "build commit: not 40 hex digits" bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha abc123
 expect_fail "build commit: upper case" bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha "$(echo "$ok" | tr a-f A-F)"
 expect_fail "build commit: a third argument" bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha "$ok" extra
+expect_fail "build commit: an empty second argument (never the branch head)" bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha ""
 bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo "GITHUB_SHA=$ok" -- build-package.sh os-vendor "$ok" >/dev/null
 expect_eq "build commit: this repository's package passes the 9-digit PLUGIN_HASH" \
 	"$(rg -c -w "PLUGIN_HASH=${ok:0:9}" "$W/make.args")" "1"
@@ -900,8 +928,18 @@ expect_eq "sign: the stamp is exactly three LF-terminated lines" \
 # nothing published holds the private key, inside the catalogue archives either, and
 # .signing/ is left empty, dot files included
 expect_eq "sign: no file under site/ holds a private key" "$(grep -rl 'PRIVATE KEY' "$W/site" "$W/out")" ""
-expect_eq "sign: no catalogue archive holds a private key" \
-	"$(for a in "$W/$R"/*.pkg; do bsdtar -xOf "$a"; done | grep -c 'PRIVATE KEY')" "0"
+# keyscan: "<n> <hits>", the catalogue archives (data.pkg, packagesite.pkg) of every tree under
+# $W/site and how many of them hold a private key
+keyscan() {
+	local a n=0 hits=0
+	for a in "$W"/site/*/*/latest/data.pkg "$W"/site/*/*/latest/packagesite.pkg; do
+		[[ -f $a ]] || continue
+		n=$((n + 1))
+		if bsdtar -xOf "$a" | grep -q 'PRIVATE KEY'; then hits=$((hits + 1)); fi
+	done
+	echo "$n $hits"
+}
+expect_eq "sign: no catalogue archive holds a private key" "$(keyscan)" "2 0"
 expect_eq "sign: .signing/ holds nothing afterwards" "$(ls -A "$W/.signing")" ""
 # the tools are the system's: an openssl, bsdtar or coreutils earlier on PATH (on the runner
 # /usr/local/bin comes first) is never run; only pkg comes from PATH or PKG=
@@ -968,22 +1006,49 @@ signdir os-alpha-1.1.pkg
 rm -f "$T/reply"
 sg "STUB_PKG_FEED=$(printf '0123456789abcdef%.0s' 1 2 3 4)" "STUB_PKG_REPLY=$T/reply" >/dev/null 2>&1
 expect_eq "sign: the signing command signs a digest" "$(head -n 1 "$T/reply" 2>/dev/null)" "SIGNATURE"
-# a cancelled job: TERM reaches the shell while pkg runs, then pkg; the key is removed all the same
+# a signing reply pkg cannot read (it stops before END): pkg fails, so the signing fails, the key is
+# removed and nothing is published
+signdir os-alpha-1.1.pkg
+if err=$(sg STUB_PKG_TRUNCATE=1 2>&1 >/dev/null); then bad "sign: a malformed signing reply: expected failure"; else ok; fi
+expect_eq "sign: pkg refused the malformed signing reply" "$(grep -c 'stub pkg: malformed signing reply' <<<"$err")" 1
+expect_eq "sign: nothing published after a malformed reply, and the key removed" \
+	"$(exists "$W/site/legotypes-pkg-signing.pub") $(exists "$W/$R/stamp") [$(ls -A "$W/.signing")]" "no no []"
+# a cancelled job: TERM reaches the shell while pkg runs, then pkg; the key is removed all the same.
+# The stand-in pkg sleeps in place (its pid in $T/blocked) until it is killed: the test waits at most
+# 10 s for it, says so if it never came, and leaves nothing running
 signdir os-alpha-1.1.pkg
 rm -f "$T/blocked"
 (cd "$W" && exec env STUB_PATH="$PATH" PATH="$root/tests/stub-vm:$PATH" "GITHUB_RUN_ID=$run_id" \
 	"STUB_PKG_BLOCK=$T/blocked" sh scripts/sign-catalogue.sh) >/dev/null 2>&1 &
 scpid=$!
+started=no
 for _ in $(seq 100); do
-	[[ -s $T/blocked ]] && break
+	if [[ -s $T/blocked ]]; then
+		started=yes
+		break
+	fi
 	sleep 0.1
 done
-kill -TERM "$scpid"
+expect_eq "sign: the cancelled run reached pkg within 10 s" "$started" yes
+kill -TERM "$scpid" 2>/dev/null
 sleep 0.3
-kill -TERM "$(cat "$T/blocked")" 2>/dev/null
+blocked=$(cat "$T/blocked" 2>/dev/null)
+[[ -z $blocked ]] || kill -TERM "$blocked" 2>/dev/null
 wait "$scpid" && cancelled=completed || cancelled=failed
 expect_eq "sign: a cancelled run fails" "$cancelled" "failed"
 expect_eq "sign: key removed after a cancellation" "$(ls -A "$W/.signing")" ""
+lingering=no
+if [[ -n $blocked ]]; then
+	for _ in $(seq 50); do
+		kill -0 "$blocked" 2>/dev/null || break
+		sleep 0.1
+	done
+	if kill -0 "$blocked" 2>/dev/null; then
+		lingering=yes
+		kill -KILL "$blocked" 2>/dev/null
+	fi
+fi
+expect_eq "sign: nothing of the cancelled run is left running" "$lingering" no
 signdir os-alpha-1.1.pkg os-beta-9.0.pkg
 expect_fail "sign: a release-only package in the catalogue" sg
 expect_eq "sign: key removed after a failure" "$(names "$W/.signing")" "* "
@@ -1053,6 +1118,8 @@ expect_eq "sign: a frozen tree has its own stamp" "$(fields "$W/site/FreeBSD:15:
 expect_eq "sign: the frozen tree's stamp verifies" "$(stamped "$W/site/FreeBSD:15:amd64/26.1/latest" "$T/pub.pem")" "yes"
 expect_eq "sign: one publication time for every tree" "$(sed -n 1p "$W/$R/stamp")" \
 	"$(sed -n 1p "$W/site/FreeBSD:15:amd64/26.1/latest/stamp" 2>/dev/null)"
+expect_eq "sign: no archive of either tree holds a private key" "$(keyscan)" "4 0"
+expect_eq "sign: no file of either tree holds a private key" "$(grep -rl 'PRIVATE KEY' "$W/site" "$W/out")" ""
 signdir
 printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=FreeBSD:15:amd64/26.1 FreeBSD:15:amd64/26.7\n' >"$W/repo.conf"
 mkdir -p "$W/site/FreeBSD:15:amd64/26.1/latest/All"
