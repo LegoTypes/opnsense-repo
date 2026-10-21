@@ -3,14 +3,16 @@
 # URLs under $STUB_LIVE_URL from $STUB_LIVE (a URL ending in / maps to that
 # directory's index.html; a file <name>.status holding an HTTP code makes the server
 # answer with that code instead). Every other URL goes to the real curl. Honours
-# -o, -f and -w '%{http_code}' (and skips --retry <n>).
+# -o, -f and -w '%{http_code}' (and skips --retry <n>, --proto <p> and --proto-redir <p>).
+# With STUB_CURL_LOG set, each call appends its arguments to that file, one line.
 set -euo pipefail
 args=("$@") out='' url='' fail=no wfmt=''
+[[ -z ${STUB_CURL_LOG:-} ]] || printf '%s\n' "$*" >>"$STUB_CURL_LOG"
 while [[ $# -gt 0 ]]; do
 	case $1 in
 	-o) out=$2 && shift 2 ;;
 	-w) wfmt=$2 && shift 2 ;;
-	--retry) shift 2 ;;
+	--retry | --proto | --proto-redir) shift 2 ;;
 	-*) [[ $1 == -*f* && $1 != --* ]] && fail=yes
 		shift ;;
 	*) url=$1 && shift ;;

@@ -1842,6 +1842,10 @@ rc "${ptconf[@]}" "PKG_TOOL_COMMIT=$ptc" "PKG_TOOL_SHA256=$(sum "$T/ptmirror/$pt
 expect_eq "pkg-tool: prints the installed pkg" "$(pt "$T/ptdest" 2>/dev/null)" "$T/ptdest/sbin/pkg"
 expect_eq "pkg-tool: configured for the destination" "$(sed -n 2p "$T/ptcalls" 2>/dev/null)" "--prefix=$T/ptdest"
 expect_eq "pkg-tool: the installed pkg runs" "$("$T/ptdest/sbin/pkg" -v 2>/dev/null)" "2.8.4"
+rm -f "$T/curllog"
+STUB_CURL_LOG="$T/curllog" pt "$T/ptdest" >/dev/null 2>&1
+expect_eq "pkg-tool: the archive is fetched over https only, redirects included" \
+	"$(grep -c -e "--proto =https .*--proto-redir =https" -e "--proto-redir =https .*--proto =https" "$T/curllog")" 1
 rc "${ptconf[@]}" "PKG_TOOL_COMMIT=$ptc" "PKG_TOOL_SHA256=$(printf '0%.0s' {1..64})"
 err=$(pt "$T/ptdest" 2>&1 >/dev/null)
 expect_eq "pkg-tool: a wrong sha256 fails" "$?" "1"

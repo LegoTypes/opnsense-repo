@@ -37,7 +37,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 url=https://github.com/freebsd/pkg/archive/$commit.tar.gz
-curl -fsSL --retry 3 -o "$work/pkg.tar.gz" "$url" || die "could not download $url"
+curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$work/pkg.tar.gz" "$url" || die "could not download $url"
 got=$(sha256sum "$work/pkg.tar.gz" | cut -d' ' -f1)
 # GitHub generates the archive on request; a change in its output (compression, tar
 # headers) shows here as a different sha256 for the same commit, and nothing is built
