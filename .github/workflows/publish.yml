@@ -1,9 +1,12 @@
 name: publish
 
-# Publish one catalogue package: build it, carry the other catalogue packages
-# forward from their releases unchanged, sign the catalogue and deploy it to
-# GitHub Pages, then record the build as release <name>-<version>. Nothing else
-# is rebuilt, so work on another plugin's branch never ships with this one.
+# Publish one catalogue package at the commit the owner names: build it (build.yml's
+# build job, no secret), and once the owner has read its summary and approved the
+# "release" environment, check it against that commit's source, carry the other
+# catalogue packages forward from their releases unchanged and sign the catalogue
+# (build.yml's sign job); deploy it to GitHub Pages, then record the build as release
+# <name>-<version>. Nothing else is rebuilt, so work on another plugin's branch never
+# ships with this one.
 on:
   workflow_dispatch:
     inputs:
@@ -45,6 +48,8 @@ jobs:
     # The repository and organization hold no other secrets.
     secrets: inherit
 
+  # "build" is the whole of build.yml, its sign job included (a caller cannot name a
+  # called workflow's jobs), so the deploy waits for the signed catalogue
   deploy:
     needs: build
     runs-on: ubuntu-latest

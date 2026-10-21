@@ -5,11 +5,9 @@
 # The source is GitHub's archive of freebsd/pkg at PKG_TOOL_COMMIT (repo.conf), refused
 # before anything is unpacked or built unless its sha256 is PKG_TOOL_SHA256.
 #
-# On Linux the build dependencies are installed with apt-get (through sudo unless run as
-# root) from the image's own Ubuntu archive only: /etc/apt/sources.list.d/ubuntu.sources,
-# whose Release files apt checks against Ubuntu's archive key; every other apt source the
-# image configures is ignored, and nothing else is downloaded. Run it before the signing
-# key is staged: package maintainer scripts run as root. Elsewhere (local testing) the
+# On Linux the build dependencies are installed by ubuntu-apt.sh, from the image's own
+# Ubuntu archive only, and nothing else is downloaded. Run it before the signing key is
+# staged: package maintainer scripts run as root. Elsewhere (local testing) the
 # dependencies must already be installed.
 #
 # The binary holds libpkg and pkg's bundled libraries (sqlite, lua, libucl, ...) and links
@@ -22,7 +20,6 @@ set -euo pipefail
 # (.github/workflows/build.yaml) less its test suite, compiler choice and the libraries
 # only a static link of libarchive would want; m4 generates the bundled libelf
 DEPS=(build-essential m4 libarchive-dev libssl-dev libbsd-dev zlib1g-dev libbz2-dev liblzma-dev)
-UBUNTU_SOURCES=/etc/apt/sources.list.d/ubuntu.sources
 
 die() {
 	echo "pkg-tool.sh: $*" >&2
@@ -54,16 +51,7 @@ src=$work/src/pkg-$commit
 [[ -x $src/configure ]] || die "the archive of $commit holds no pkg-$commit/configure"
 
 if [[ $(uname -s) == Linux ]]; then
-	[[ -f $UBUNTU_SOURCES ]] ||
-		die "$UBUNTU_SOURCES is missing: the build dependencies come from the image's Ubuntu archive only"
-	mkdir "$work/no-other-sources"
-	sudo=()
-	[[ $(id -u) -eq 0 ]] || sudo=(sudo)
-	apt=("${sudo[@]}" env DEBIAN_FRONTEND=noninteractive apt-get -q
-		-o "Dir::Etc::SourceList=$UBUNTU_SOURCES" -o "Dir::Etc::SourceParts=$work/no-other-sources")
-	"${apt[@]}" update
-	"${apt[@]}" -y --no-install-recommends install "${DEPS[@]}"
-	dpkg-query -W -f '${Package} ${Version}\n' "${DEPS[@]}"
+	bash "$here/ubuntu-apt.sh" "${DEPS[@]}"
 else
 	echo "pkg-tool.sh: not Linux: building with the dependencies already installed"
 fi

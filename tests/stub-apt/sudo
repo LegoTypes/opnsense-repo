@@ -1,3 +1,4 @@
 #!/bin/sh
-# A stand-in for sudo in pkg-tool.sh's tests: runs the command as the caller.
+# A stand-in for sudo in the tests of pkg-tool.sh and ubuntu-apt.sh: runs the command as
+# the caller.
 exec "$@"

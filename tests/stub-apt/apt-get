@@ -1,3 +1,17 @@
 #!/bin/sh
-# A stand-in for apt-get in pkg-tool.sh's tests (its Linux branch): installs nothing.
+# A stand-in for apt-get in the tests of pkg-tool.sh and ubuntu-apt.sh: installs nothing.
+# With APT_CALLS set, appends a line per call: its arguments, with the directory of
+# Dir::Etc::SourceParts=<dir> replaced by the number of entries it holds.
+if [ -n "${APT_CALLS:-}" ]; then
+	line=''
+	for a in "$@"; do
+		case $a in
+		Dir::Etc::SourceParts=*)
+			a="Dir::Etc::SourceParts=<$(find "${a#Dir::Etc::SourceParts=}" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ') entries>"
+			;;
+		esac
+		line="$line $a"
+	done
+	echo "${line# }" >>"$APT_CALLS"
+fi
 exit 0
