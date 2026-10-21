@@ -272,17 +272,29 @@ expect_eq "publish.yml: deploy waits for build.yml, signing included" "$(yget "$
 expect_eq "publish.yml: release waits for the deploy" "$(yget "$P" jobs.release.needs)" "[build, deploy]"
 expect_eq "build.yml: the tag comes from the review job" "$(yget "$B" on.workflow_call.outputs.tag.value)" \
 	'${{ jobs.review.outputs.tag }}'
+# the sha256 sums the review job showed, which only its runner can set, bind the files sign and
+# release use to what the approver read
+sums="pkg_sha256 manifest_sha256 source_sha256 build_sha256"
+for o in $sums; do
+	expect_eq "build.yml: the workflow passes on review's $o" "$(yget "$B" "on.workflow_call.outputs.$o.value")" "\${{ jobs.review.outputs.$o }}"
+done
 expect_eq "build.yml: a required commit input" \
 	"$(yget "$B" on.workflow_call.inputs.commit.type) $(yget "$B" on.workflow_call.inputs.commit.required)" "string true"
 # the release notes are the review job's lines, never the VM's
 rm_=$(ymarks "$P" release)
 expect_eq "publish.yml: release takes both artifacts, checks the build, then releases" "$(tr '\n' ',' <<<"$rm_")" \
-	"actions/checkout,actions/download-artifact,actions/download-artifact,out-dir.sh release.sh,"
+	"actions/checkout,actions/download-artifact,actions/download-artifact,out-dir.sh review-sums.sh release.sh,"
 expect_eq "publish.yml: release downloads package into out and review into review" \
 	"$(for i in 2 3; do printf '%s=%s ' "$(yget "$P" "jobs.release.steps.$i.with.name")" "$(yget "$P" "jobs.release.steps.$i.with.path")"; done)" \
 	"package=out review=review "
 expect_eq "publish.yml: the release notes come from review/, not out/" \
 	"$(yget "$P" jobs.release.steps.4.run | awk '/release\.sh create/ && /review\/source/ && /review\/build/ && !/out\/source|out\/build/ { print "review" }')" review
+expect_eq "publish.yml: release checks the files against review's sums before it releases" \
+	"$(yget "$P" jobs.release.steps.4.run | tr '\n' ';')" \
+	'bash scripts/out-dir.sh "$PACKAGE" out;bash scripts/review-sums.sh check "$PACKAGE" out review;bash scripts/release.sh create out/*.pkg "$(cat review/source)" review/build;'
+expect_eq "publish.yml: release takes the sums and the commit through env" \
+	"$(for o in PKG MANIFEST SOURCE BUILD; do printf '%s ' "$(yget "$P" "jobs.release.steps.4.env.${o}_SHA256")"; done)$(yget "$P" jobs.release.steps.4.env.COMMIT)" \
+	'${{ needs.build.outputs.pkg_sha256 }} ${{ needs.build.outputs.manifest_sha256 }} ${{ needs.build.outputs.source_sha256 }} ${{ needs.build.outputs.build_sha256 }} ${{ inputs.commit }}'
 
 # build.yml: three jobs; build and review have no environment and no secret, sign has both;
 # review and sign run only GitHub's actions and this repository's scripts
@@ -306,8 +318,9 @@ for j in build review sign; do
 	expect_eq "build.yml: $j only reads the repository" \
 		"$(awk -F'\t' -v p="jobs.$j.permissions" 'index($1, p) == 1 { print substr($1, length(p) + 2) "=" $2 }' <<<"$B")" "contents=read"
 done
-expect_eq "build.yml: only review has outputs, the tag" \
-	"$(awk -F'\t' '$1 ~ /^jobs\.[^.]+\.outputs\./ { print $1 "=" $2 }' <<<"$B")" 'jobs.review.outputs.tag=${{ steps.check.outputs.tag }}'
+expect_eq "build.yml: only review has outputs, the tag and the four sums" \
+	"$(awk -F'\t' '$1 ~ /^jobs\.[^.]+\.outputs\./ { print $1 "=" $2 }' <<<"$B" | tr '\n' ' ')" \
+	'jobs.review.outputs.tag=${{ steps.check.outputs.tag }} jobs.review.outputs.pkg_sha256=${{ steps.sums.outputs.pkg_sha256 }} jobs.review.outputs.manifest_sha256=${{ steps.sums.outputs.manifest_sha256 }} jobs.review.outputs.source_sha256=${{ steps.sums.outputs.source_sha256 }} jobs.review.outputs.build_sha256=${{ steps.sums.outputs.build_sha256 }} '
 expect_eq "build.yml: no ::error:: line repeats the commit as given" \
 	"$(awk -F'\t' '$2 ~ /::error::/ && $2 ~ /COMMIT|inputs\.commit/' <<<"$B")" ""
 
@@ -333,7 +346,7 @@ expect_eq "build: and then only the upload, of out/ as package" \
 # notes' lines, made by this repository's scripts from its own checkout
 rv=$(ymarks "$B" review)
 expect_eq "review: the steps in order" "$(tr '\n' ',' <<<"$rv")" \
-	"actions/checkout,actions/download-artifact,out-dir.sh,upstream.sh,provenance.sh,release.sh,manifest.sh,plugin-source.sh,ubuntu-apt.sh,summary.sh,actions/upload-artifact,"
+	"actions/checkout,actions/download-artifact,out-dir.sh,upstream.sh,provenance.sh,release.sh,manifest.sh,plugin-source.sh,ubuntu-apt.sh,summary.sh,review-sums.sh,actions/upload-artifact,"
 expect_eq "review: the full history, for the last commit that changed this repository's package" \
 	"$(yget "$B" jobs.review.steps.1.with.fetch-depth)" 0
 expect_eq "review: downloads package into out" "$(yget "$B" jobs.review.steps.2.with.name) $(yget "$B" jobs.review.steps.2.with.path)" "package out"
@@ -342,6 +355,9 @@ expect_eq "review: the manifest goes to review/" \
 	"$(yget "$B" "jobs.review.steps.$(ystep "$rv" manifest.sh).run" | tr '\n' ';')" 'bash scripts/manifest.sh "$PACKAGE" out;mv out/manifest review/manifest;'
 expect_eq "review: the summary goes to the job's summary" \
 	"$(yget "$B" "jobs.review.steps.$(ystep "$rv" summary.sh).run")" 'bash scripts/summary.sh "$PACKAGE" out review >> "$GITHUB_STEP_SUMMARY"'
+expect_eq "review: the four sums, last, from the files it uploads" \
+	"$(yget "$B" "jobs.review.steps.$(ystep "$rv" review-sums.sh).id") $(yget "$B" "jobs.review.steps.$(ystep "$rv" review-sums.sh).run")" \
+	'sums bash scripts/review-sums.sh print "$PACKAGE" out review >> "$GITHUB_OUTPUT"'
 expect_eq "review: the artifact is review/" \
 	"$(yget "$B" "jobs.review.steps.$(ystep "$rv" actions/upload-artifact).with.name") $(yget "$B" "jobs.review.steps.$(ystep "$rv" actions/upload-artifact).with.path")" \
 	"review review/"
@@ -350,8 +366,15 @@ expect_eq "review: the artifact is review/" \
 # key is removed whatever happens
 sm=$(ymarks "$B" sign)
 expect_eq "sign: the steps in order" "$(tr '\n' ',' <<<"$sm")" \
-	"actions/checkout,actions/download-artifact,actions/download-artifact,out-dir.sh,plugin-source.sh,ubuntu-apt.sh,payload.sh,release.sh,pkg-tool.sh,carry-forward.sh,stage,sign-catalogue.sh,unstage,actions/upload-pages-artifact,"
+	"actions/checkout,actions/download-artifact,actions/download-artifact,out-dir.sh review-sums.sh,plugin-source.sh,ubuntu-apt.sh,payload.sh,release.sh,pkg-tool.sh,carry-forward.sh,stage,sign-catalogue.sh,unstage,actions/upload-pages-artifact,"
 pt_step=$(ystep "$sm" pkg-tool.sh) stage_step=$(ystep "$sm" stage) rel_step=$(ystep "$sm" release.sh)
+chk_step=$(ystep "$sm" review-sums.sh)
+expect_eq "sign: right after the downloads, the files are checked against review's sums" \
+	"$chk_step $(yget "$B" "jobs.sign.steps.$chk_step.run" | tail -2 | tr '\n' ';')" \
+	'4 bash scripts/out-dir.sh "$PACKAGE" out;bash scripts/review-sums.sh check "$PACKAGE" out review;'
+expect_eq "sign: the sums come from the review job's outputs through env, the commit from the input" \
+	"$(for o in PKG MANIFEST SOURCE BUILD; do printf '%s ' "$(yget "$B" "jobs.sign.steps.$chk_step.env.${o}_SHA256")"; done)$(yget "$B" jobs.sign.env.COMMIT)" \
+	'${{ needs.review.outputs.pkg_sha256 }} ${{ needs.review.outputs.manifest_sha256 }} ${{ needs.review.outputs.source_sha256 }} ${{ needs.review.outputs.build_sha256 }} ${{ inputs.commit }}'
 expect_eq "sign: pkg-tool.sh runs before the key is staged" \
 	"$([[ -n $pt_step && -n $stage_step ]] && ((pt_step < stage_step)) && echo before)" before
 expect_eq "sign: the version is checked again before the key is staged" \
@@ -1859,6 +1882,89 @@ unset PCOMMIT
 touch "$po/extra"
 expect_fail "payload.sh: not a build" pl
 rm "$po/extra"
+
+# --- review-sums.sh: the review job's sums, and the check sign and release run against them -------
+rs() { bash "$root/scripts/review-sums.sh" "$@"; }
+rv_="$T/rv"
+# rsset: $od, a build of os-alpha, and $rv_, the review job's files for it; rsv, the sums print gives
+rsset() {
+	unset RS_MANIFEST
+	odset
+	rm -rf "$rv_" && mkdir -p "$rv_"
+	printf 'Built from Org/plugins, branch br-alpha, commit %s.\n' "$commit" >"$rv_/source"
+	printf 'abi: FreeBSD:15:amd64\nseries: 26.7\nfreebsd: 15.1-RELEASE-p3 (reported by the build VM)\nphp: 85\npython: 313\n' >"$rv_/build"
+	printf 'built os-alpha-1.0_1.pkg %s\ncarry FreeBSD:15:amd64/26.7 os-beta-1.0 %s immutable=no\ncommit %s\n' \
+		"$(sum "$od/os-alpha-1.0_1.pkg")" "$(printf 'b%.0s' {1..64})" "$commit" >"$rv_/manifest"
+	mapfile -t rsv < <(rs print os-alpha "$od" "$rv_" | cut -d= -f2)
+}
+# rsc: check against the sums print gave and $commit; RS_PKG, RS_MANIFEST, RS_SOURCE, RS_BUILD and
+# RS_COMMIT replace one
+rsc() {
+	PKG_SHA256=${RS_PKG-${rsv[0]-}} MANIFEST_SHA256=${RS_MANIFEST-${rsv[1]-}} SOURCE_SHA256=${RS_SOURCE-${rsv[2]-}} \
+		BUILD_SHA256=${RS_BUILD-${rsv[3]-}} COMMIT=${RS_COMMIT-$commit} rs check os-alpha "$od" "$rv_"
+}
+rscwith() {
+	local "$1"
+	rsc
+}
+# rsmanifest <built name> <built sum> <commit>: rewrite the manifest; its new sum is the expected one, so
+# only the line check can refuse it
+rsmanifest() {
+	printf 'built %s %s\ncommit %s\n' "$1" "$2" "$3" >"$rv_/manifest"
+	RS_MANIFEST=$(sum "$rv_/manifest")
+}
+rsset
+expect_eq "review-sums: print names the four sums, each the file's sha256" "$(rs print os-alpha "$od" "$rv_")" \
+	"pkg_sha256=$(sum "$od/os-alpha-1.0_1.pkg")
+manifest_sha256=$(sum "$rv_/manifest")
+source_sha256=$(sum "$rv_/source")
+build_sha256=$(sum "$rv_/build")"
+expect_eq "review-sums: check passes on the files print summed" "$(rsc >/dev/null 2>&1; echo "rc=$?")" "rc=0"
+echo changed >>"$od/os-alpha-1.0_1.pkg"
+expect_eq "review-sums: another package" "$(rsc 2>&1 >/dev/null)" "review-sums.sh: the package is not the one the review job showed"
+for f in manifest source build; do
+	rsset && echo changed >>"$rv_/$f"
+	expect_eq "review-sums: another $f" "$(rsc 2>&1 >/dev/null)" "review-sums.sh: review/$f is not the one the review job wrote"
+done
+rsset && rsmanifest 'os-alpha-9.9.pkg::error::x' "$(sum "$od/os-alpha-1.0_1.pkg")" "$commit"
+err=$(rsc 2>&1 >/dev/null)
+expect_eq "review-sums: the manifest's built line names another file, and nothing of it is repeated" \
+	"$err" "review-sums.sh: the manifest's built line is not this package and its sha256"
+rsset && rsmanifest os-alpha-1.0_1.pkg "$(printf 'c%.0s' {1..64})" "$commit"
+expect_fail "review-sums: the manifest's built line has another sha256" rsc
+rsset && rsmanifest os-alpha-1.0_1.pkg "$(sum "$od/os-alpha-1.0_1.pkg")" "$other"
+expect_eq "review-sums: the manifest's commit line is another commit" "$(rsc 2>&1 >/dev/null)" \
+	"review-sums.sh: the manifest's commit line is not the approved commit"
+rsset
+expect_fail "review-sums: the approved commit is another than the manifest's" rscwith "RS_COMMIT=$other"
+rsset && printf 'built os-alpha-1.0_1.pkg %s\nbuilt os-alpha-1.0_1.pkg %s\ncommit %s\n' "$(sum "$od/os-alpha-1.0_1.pkg")" \
+	"$(sum "$od/os-alpha-1.0_1.pkg")" "$commit" >"$rv_/manifest" && RS_MANIFEST=$(sum "$rv_/manifest")
+expect_fail "review-sums: two built lines" rsc
+rsset
+for v in RS_PKG= "RS_PKG=$(printf 'A%.0s' {1..64})" "RS_SOURCE=$(printf 'a%.0s' {1..63})" RS_BUILD=x; do
+	expect_eq "review-sums: a missing or malformed sum (${v:0:20})" "$(rscwith "$v" 2>&1 >/dev/null)" \
+		"review-sums.sh: the review job's sums are missing or not 64 lower-case hex digits"
+done
+expect_eq "review-sums: an abbreviated approved commit" "$(rscwith "RS_COMMIT=${commit:0:9}" 2>&1 >/dev/null)" \
+	"review-sums.sh: COMMIT must be the approved commit, 40 lower-case hex digits"
+rsset && touch "$rv_/extra"
+expect_fail "review-sums: another file in review/" rsc
+rsset && rm "$rv_/source" && ln -s build "$rv_/source"
+expect_fail "review-sums: a symlink in review/" rsc
+rsset && rm "$rv_/build"
+expect_fail "review-sums: no build in review/" rsc
+expect_fail "review-sums: print refuses an incomplete review/" rs print os-alpha "$od" "$rv_"
+rsset && touch "$od/extra"
+expect_fail "review-sums: print refuses an out/ that is not a build" rs print os-alpha "$od" "$rv_"
+# a sha256 that is not 64 lower-case hex digits never reaches the job's outputs
+mkdir -p "$T/badsha"
+printf '%s\n' '#!/bin/sh' 'echo "ABC  $1"' >"$T/badsha/sha256sum"
+chmod 755 "$T/badsha/sha256sum"
+rsset
+expect_eq "review-sums: print refuses a sum that is not 64 hex digits, and prints nothing" \
+	"$(PATH="$T/badsha:$PATH" rs print os-alpha "$od" "$rv_" 2>/dev/null; echo "rc=$?")" "rc=1"
+expect_fail "review-sums: usage" rs print os-alpha "$od"
+expect_fail "review-sums: an unknown command" rs sum os-alpha "$od" "$rv_"
 
 # --- summary.sh ---------------------------------------------------------------------------
 # outside: on stdin markdown, out the lines a CommonMark renderer reads as markdown, outside every

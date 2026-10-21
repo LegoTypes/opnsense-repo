@@ -31,6 +31,15 @@ on:
       tag:
         description: The release tag the build will get, <name>-<version>
         value: ${{ jobs.review.outputs.tag }}
+      # the sha256 of the package and of the review files, as the review job showed them
+      pkg_sha256:
+        value: ${{ jobs.review.outputs.pkg_sha256 }}
+      manifest_sha256:
+        value: ${{ jobs.review.outputs.manifest_sha256 }}
+      source_sha256:
+        value: ${{ jobs.review.outputs.source_sha256 }}
+      build_sha256:
+        value: ${{ jobs.review.outputs.build_sha256 }}
 
 defaults:
   run:
@@ -118,8 +127,14 @@ jobs:
     # quotes what it names.
     permissions:
       contents: read
+    # job outputs only this job's runner can set: they bind the artifacts sign and release
+    # use to what the approver read
     outputs:
       tag: ${{ steps.check.outputs.tag }}
+      pkg_sha256: ${{ steps.sums.outputs.pkg_sha256 }}
+      manifest_sha256: ${{ steps.sums.outputs.manifest_sha256 }}
+      source_sha256: ${{ steps.sums.outputs.source_sha256 }}
+      build_sha256: ${{ steps.sums.outputs.build_sha256 }}
     env:
       PACKAGE: ${{ inputs.package }}
       COMMIT: ${{ inputs.commit }}
@@ -183,6 +198,10 @@ jobs:
           PLUGIN_DIR: ${{ steps.source.outputs.dir }}
         run: bash scripts/summary.sh "$PACKAGE" out review >> "$GITHUB_STEP_SUMMARY"
 
+      - name: The sha256 of what the summary shows
+        id: sums
+        run: bash scripts/review-sums.sh print "$PACKAGE" out review >> "$GITHUB_OUTPUT"
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: review
@@ -225,16 +244,22 @@ jobs:
           name: review
           path: review
 
+      # the artifacts must be the files the review job summed, which the approver read
       - name: Check the build
         env:
           PACKAGE_ARTIFACT: ${{ steps.package.outcome }}
           REVIEW_ARTIFACT: ${{ steps.review.outcome }}
+          PKG_SHA256: ${{ needs.review.outputs.pkg_sha256 }}
+          MANIFEST_SHA256: ${{ needs.review.outputs.manifest_sha256 }}
+          SOURCE_SHA256: ${{ needs.review.outputs.source_sha256 }}
+          BUILD_SHA256: ${{ needs.review.outputs.build_sha256 }}
         run: |
           if [ "$PACKAGE_ARTIFACT" != success ] || [ "$REVIEW_ARTIFACT" != success ]; then
             echo "::error::no package artifact: re-run the whole workflow"
             exit 1
           fi
           bash scripts/out-dir.sh "$PACKAGE" out
+          bash scripts/review-sums.sh check "$PACKAGE" out review
 
       # data for the payload check, never run
       - name: The plugin source at the commit
