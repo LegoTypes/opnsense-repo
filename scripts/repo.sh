@@ -1,5 +1,6 @@
 #!/bin/sh
-# Read repo.conf (REPO_CONF overrides its path).
+# Read repo.conf, beside this script's directory and nowhere else: it pins the source of the pkg
+# that signs the catalogue (PKG_TOOL_SHA256), so no environment variable moves it.
 #   repo.sh abi            the package ABI builds target, e.g. FreeBSD:15:amd64
 #   repo.sh series         the series builds target, e.g. 26.7
 #   repo.sh target         the target tree, <ABI>/<series>
@@ -15,7 +16,7 @@
 # A malformed file fails every command.
 set -eu
 
-conf=${REPO_CONF:-$(dirname "$0")/../repo.conf}
+conf=$(dirname "$0")/../repo.conf
 
 die() {
 	echo "repo.sh: $*" >&2

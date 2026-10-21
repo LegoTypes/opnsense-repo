@@ -1,12 +1,14 @@
 #!/bin/sh
-# Read packages.conf (PACKAGES_CONF overrides its path).
+# Read packages.conf, beside this script's directory and nowhere else: it names the
+# repository each package is built from and checked against, so no environment
+# variable moves it.
 #   packages.sh row <package>   print "<repository> <branch> <directory> <catalogue>"
 #   packages.sh catalogue       print the catalogue packages, one per line
 # A malformed file fails every command, so a typo stops a run instead of
 # silently dropping a package from the catalogue.
 set -eu
 
-conf=${PACKAGES_CONF:-$(dirname "$0")/../packages.conf}
+conf=$(dirname "$0")/../packages.conf
 
 die() {
 	echo "packages.sh: $*" >&2

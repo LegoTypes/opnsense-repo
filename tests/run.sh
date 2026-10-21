@@ -18,8 +18,41 @@ expect_fail() {
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 
+# anchor <file> <name> <line>: "<n> <m>", <n> the assignments to <name> in <file> (any
+# indentation, any condition), <m> how many lines are exactly <line>: "1 1" when the one
+# assignment is that literal line, with no override
+anchor() { echo "$(grep -oE "(^|[^A-Za-z0-9_])$2=" "$1" | wc -l | tr -d ' ') $(grep -cxF -- "$3" "$1")"; }
+# The harness runs a copy of scripts/ whose repo.sh and packages.sh read $T/repo.conf and
+# $T/packages.conf (the one line that names each file substituted): both files are trust
+# anchors (repo.conf pins pkg's source, packages.conf names the repositories a build is
+# checked against), so the production scripts honour no environment override of either.
+S="$T/scripts"
+cp -R "$root/scripts" "$S"
+sed "s|^conf=.*|conf=$T/repo.conf|" "$root/scripts/repo.sh" >"$S/repo.sh"
+sed "s|^conf=.*|conf=$T/packages.conf|" "$root/scripts/packages.sh" >"$S/packages.sh"
+expect_eq "the harness copies read the test configuration" \
+	"$(grep -cxF "conf=$T/repo.conf" "$S/repo.sh") $(grep -cxF "conf=$T/packages.conf" "$S/packages.sh")" "1 1"
+repo_line='conf=$(dirname "$0")/../repo.conf'
+packages_line='conf=$(dirname "$0")/../packages.conf'
+expect_eq "repo.sh: repo.conf is found from the script's own location, one literal line, no override" \
+	"$(anchor "$root/scripts/repo.sh" conf "$repo_line")" "1 1"
+expect_eq "packages.sh: packages.conf is found from the script's own location, one literal line, no override" \
+	"$(anchor "$root/scripts/packages.sh" conf "$packages_line")" "1 1"
+{ cat "$root/scripts/repo.sh"; echo '[ -z "${X:-}" ] || conf=$X'; } >"$T/mutant.sh"
+expect_eq "anchor: the static check rejects an override" "$(anchor "$T/mutant.sh" conf "$repo_line")" "2 1"
+sed 's|^conf=.*|conf=${REPO_CONF:-$(dirname "$0")/../repo.conf}|' "$root/scripts/repo.sh" >"$T/mutant.sh"
+expect_eq "anchor: the static check rejects a default that an environment variable replaces" \
+	"$(anchor "$T/mutant.sh" conf "$repo_line")" "1 0"
+printf 'ABI=FreeBSD:9:amd64\nSERIES=1.1\nSERVE=FreeBSD:9:amd64/1.1\n' >"$T/decoy.conf"
+printf 'os-decoy Org/decoy br net/decoy yes\n' >"$T/decoy-packages.conf"
+expect_eq "repo.sh: REPO_CONF changes nothing" "$(REPO_CONF="$T/decoy.conf" sh "$root/scripts/repo.sh" target)" \
+	"$(sh "$root/scripts/repo.sh" target)"
+expect_eq "packages.sh: PACKAGES_CONF changes nothing" \
+	"$(PACKAGES_CONF="$T/decoy-packages.conf" sh "$root/scripts/packages.sh" catalogue | tr '\n' ' ')" \
+	"$(sh "$root/scripts/packages.sh" catalogue | tr '\n' ' ')"
+
 conf() { printf '%s\n' "$@" >"$T/packages.conf"; }
-pk() { PACKAGES_CONF="$T/packages.conf" sh "$root/scripts/packages.sh" "$@"; }
+pk() { sh "$S/packages.sh" "$@"; }
 
 # --- packages.sh -------------------------------------------------------------
 conf '# comment' '' \
@@ -46,7 +79,7 @@ rc() {
 	printf '%s\n' "$@" >"$T/repo.conf"
 	printf '%s\n' "$@" | grep -q '^REQUIRE_IMMUTABLE_RELEASES=' || echo 'REQUIRE_IMMUTABLE_RELEASES=no' >>"$T/repo.conf"
 }
-rp() { REPO_CONF="$T/repo.conf" sh "$root/scripts/repo.sh" "$@"; }
+rp() { sh "$S/repo.sh" "$@"; }
 rc '# served repository' 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7 FreeBSD:15:amd64/27.1'
 expect_eq "repo abi" "$(rp abi)" "FreeBSD:15:amd64"
 expect_eq "repo series" "$(rp series)" "26.7"
@@ -436,7 +469,7 @@ live() {
 export LIVE_SITE=https://live.test STUB_LIVE_URL=https://live.test STUB_LIVE="$T/livesite"
 names() { (cd "$1" && printf '%s ' *); }
 # cf <built>: carry-forward in $T/cfw with $T/packages.conf and $T/repo.conf; trees land under $T/cfw/site
-cf() { (rm -rf "$T/cfw" && mkdir -p "$T/cfw" && cd "$T/cfw" && PACKAGES_CONF="$T/packages.conf" REPO_CONF="$T/repo.conf" bash "$root/scripts/carry-forward.sh" "$@"); }
+cf() { (rm -rf "$T/cfw" && mkdir -p "$T/cfw" && cd "$T/cfw" && bash "$S/carry-forward.sh" "$@"); }
 tree() { echo "$T/cfw/site/FreeBSD:15:amd64/${1:-26.7}/latest/All"; }
 # cfok <built>: carry-forward that must succeed
 cfok() { cf "$@" >/dev/null || bad "carry-forward $* exited non-zero"; }
@@ -574,7 +607,7 @@ C40=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 mf() {
 	rm -rf "$T/mo" && mkdir -p "$T/mo"
 	echo built >"$T/mo/$1-1.1.pkg"
-	PACKAGES_CONF="$T/packages.conf" REPO_CONF="$T/repo.conf" COMMIT=$C40 bash "$root/scripts/manifest.sh" "$1" "$T/mo"
+	COMMIT=$C40 bash "$S/manifest.sh" "$1" "$T/mo"
 }
 rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 reset_stub
@@ -657,7 +690,7 @@ expect_eq "not required: a release that is not immutable is carried and listed" 
 expect_fail "manifest.sh without the approved commit" env -u COMMIT bash "$root/scripts/manifest.sh" os-alpha "$T/mo"
 expect_fail "manifest.sh with a short commit" env COMMIT=abc123 bash "$root/scripts/manifest.sh" os-alpha "$T/mo"
 rm -f "$T/mo/os-alpha-1.1.pkg"
-expect_fail "manifest.sh without a built package" env PACKAGES_CONF="$T/packages.conf" REPO_CONF="$T/repo.conf" COMMIT=$C40 bash "$root/scripts/manifest.sh" os-alpha "$T/mo"
+expect_fail "manifest.sh without a built package" env COMMIT=$C40 bash "$S/manifest.sh" os-alpha "$T/mo"
 rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 
 # --- newest-release.sh ----------------------------------------------------------
@@ -855,6 +888,46 @@ rm -f "$T/evil.ran"
 sg "STUB_PATH=$PATH" "PATH=$T/evil:$PATH" "EVIL_RAN=$T/evil.ran" >/dev/null 2>&1
 expect_eq "sign: no tool from earlier on PATH is run" "$(sort -u "$T/evil.ran" 2>/dev/null | tr '\n' ' ')" ""
 expect_eq "sign: signed with the system's tools" "$(stamped "$W/$R" "$T/pub.pem")" "yes"
+# the published key, the trusted fingerprints, repo.conf and packages.conf are the script's own
+# checkout's, never the working directory's (which holds only out/, .signing/ and site/): a working
+# directory with another key and a fingerprint for it changes nothing
+signdir os-alpha-1.1.pkg
+rm -rf "$T/wd"
+cp -R "$W" "$T/wd"
+cp "$T/other.pub" "$T/wd/keys/legotypes-pkg-signing.pub"
+printf 'function: "sha256"\nfingerprint: "%s"\n' "$(sum "$T/other.pub")" \
+	>"$T/wd/vendor/legotypes/src/etc/pkg/fingerprints/LegoTypes/trusted/test.1"
+(cd "$T/wd" && STUB_PATH="$PATH" PATH="$root/tests/stub-vm:$PATH" GITHUB_RUN_ID=$run_id sh "$W/scripts/sign-catalogue.sh") \
+	>/dev/null 2>&1
+expect_eq "sign: from another working directory, the key published is the script's checkout's" \
+	"$(cat "$T/wd/site/legotypes-pkg-signing.pub" 2>/dev/null)" "$(cat "$T/pub.pem")"
+expect_eq "sign: from another working directory, the stamp verifies with the script's checkout's key" \
+	"$(stamped "$T/wd/$R" "$T/pub.pem")" "yes"
+signdir os-alpha-1.1.pkg
+rm -rf "$T/wd"
+cp -R "$W" "$T/wd"
+cp "$T/other.pub" "$W/keys/legotypes-pkg-signing.pub"
+expect_fail "sign: the script's own checkout's key decides, not the working directory's" \
+	sh -c 'cd "$1" && STUB_PATH="$PATH" PATH="$2:$PATH" GITHUB_RUN_ID=1 sh "$3/scripts/sign-catalogue.sh"' _ \
+	"$T/wd" "$root/tests/stub-vm" "$W"
+signdir os-alpha-1.1.pkg
+rm -rf "$T/it's a checkout"
+cp -R "$W" "$T/it's a checkout"
+(cd "$T/it's a checkout" && STUB_PATH="$PATH" PATH="$root/tests/stub-vm:$PATH" GITHUB_RUN_ID=$run_id \
+	sh "$T/it's a checkout/scripts/sign-catalogue.sh") >/dev/null 2>&1
+expect_eq "sign: a checkout whose path holds a quote and a space" "$(stamped "$T/it's a checkout/$R" "$T/pub.pem")" "yes"
+sign_here='here=$(dirname "$0")'
+sign_pub='PUB=$here/../keys/legotypes-pkg-signing.pub'
+sign_trusted='TRUSTED=$here/../vendor/legotypes/src/etc/pkg/fingerprints/LegoTypes/trusted'
+expect_eq "sign-catalogue.sh: the script's location, one literal line, no override" \
+	"$(anchor "$root/scripts/sign-catalogue.sh" here "$sign_here")" "1 1"
+expect_eq "sign-catalogue.sh: the published key from the script's location, one literal line, no override" \
+	"$(anchor "$root/scripts/sign-catalogue.sh" PUB "$sign_pub")" "1 1"
+expect_eq "sign-catalogue.sh: the trusted fingerprints from the script's location, one literal line, no override" \
+	"$(anchor "$root/scripts/sign-catalogue.sh" TRUSTED "$sign_trusted")" "1 1"
+# shellcheck disable=SC2016 # the patterns name the script's own text
+expect_eq "sign-catalogue.sh: repo.sh and packages.sh from the script's location" \
+	"$(grep -c 'sh scripts/' "$root/scripts/sign-catalogue.sh") $(grep -c 'sh "$here/\(repo\|packages\)\.sh"' "$root/scripts/sign-catalogue.sh")" "0 5"
 # the signing command signs only a sha256 digest: 64 lowercase hex digits, else it answers nothing
 for feed in hello "" "$(printf 'A%.0s' {1..64})" "$(printf 'a%.0s' {1..63})" "$(printf 'a%.0s' {1..65})" \
 	"$(printf 'a%.0s' {1..64}) " "$(printf 'g%.0s' {1..64})"; do
@@ -1006,10 +1079,10 @@ core() { # core <version> <FreeBSD_version> <dependency names...>
 # the harness runs a copy of upstream.sh with its fingerprint directory (the one line that
 # names it) substituted: the production script honours no environment override of it
 mkdir -p "$T/upcopy/scripts" "$T/upfp"
-cp "$root/scripts/repo.sh" "$T/upcopy/scripts/"
+cp "$S/repo.sh" "$T/upcopy/scripts/"
 sed "s|^keys=.*|keys=$T/upfp|" "$root/scripts/upstream.sh" >"$T/upcopy/scripts/upstream.sh"
 printf 'function: "sha256"\nfingerprint: "%s"\n' "$(openssl dgst -sha256 -r "$T/pub.pem" | cut -d' ' -f1)" >"$T/upfp/test"
-up() { REPO_CONF="$T/repo.conf" bash "$T/upcopy/scripts/upstream.sh" "$@"; }
+up() { bash "$T/upcopy/scripts/upstream.sh" "$@"; }
 rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 mirror 26.1 26.7
 site 26.7 "$(core 26.7.5 1501000 php85-curl php85-xml py313-requests pkg)" '{"name":"php85","version":"8.5.10"}'
@@ -1627,7 +1700,7 @@ cp -R "$W/canary" "$cw/"
 printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=FreeBSD:15:amd64/26.7\n' >"$T/repo.conf"
 printf 'NEWEST=26.7\nNEXT_ABI=\nSERIES=26.7\nCORE=26.7.5\nPHP=85\nPYTHON=313\nFREEBSD=15.1\n' >"$cw/upstream.env"
 reset_stub
-canary_run() { (cd "$cw" && PACKAGES_CONF="$T/packages.conf" REPO_CONF="$T/repo.conf" bash "$root/scripts/canary.sh" https://run/2); }
+canary_run() { (cd "$cw" && bash "$S/canary.sh" https://run/2); }
 out=$(canary_run)
 rc=$?
 expect_eq "canary: a failed build makes the run fail" "$rc" "1"
@@ -1662,7 +1735,7 @@ echo "catalogue data" >"$T/data"
 openssl dgst -sha256 -r "$T/data" | cut -d' ' -f1 | tr -d '\n' | openssl dgst -sha256 -sign "$T/key.pem" -binary >"$T/data.sig"
 cp "$T/pub.pem" "$T/data.pub"
 tar -cf "$d/data.pkg" -C "$T" data data.sig data.pub
-vc() { REPO_CONF="$T/repo.conf" PUB_KEY="$T/pub.pem" bash "$root/scripts/verify-catalogue.sh" "$@"; }
+vc() { PUB_KEY="$T/pub.pem" bash "$S/verify-catalogue.sh" "$@"; }
 expect_eq "verify: a good publish" "$(vc os-alpha >/dev/null; echo "rc=$?")" "rc=0"
 live os-alpha-1.0
 expect_fail "verify: the tree serves an older build" vc os-alpha
@@ -1691,8 +1764,8 @@ tar -czf "$T/ptmirror/$ptc.tar.gz" -C "$T/ptsrc" "pkg-$ptc"
 # dpkg-query stand in for them
 pt() {
 	rm -rf "$T/ptdest" "$T/ptcalls"
-	PATH="$root/tests/stub-apt:$PATH" PT_CALLS="$T/ptcalls" REPO_CONF="$T/repo.conf" STUB_MIRROR="$T/ptmirror" \
-		STUB_MIRROR_URL=https://github.com/freebsd/pkg/archive bash "$root/scripts/pkg-tool.sh" "$@"
+	PATH="$root/tests/stub-apt:$PATH" PT_CALLS="$T/ptcalls" STUB_MIRROR="$T/ptmirror" \
+		STUB_MIRROR_URL=https://github.com/freebsd/pkg/archive bash "$S/pkg-tool.sh" "$@"
 }
 rc "${ptconf[@]}" "PKG_TOOL_COMMIT=$ptc" "PKG_TOOL_SHA256=$(sum "$T/ptmirror/$ptc.tar.gz")"
 expect_eq "pkg-tool: prints the installed pkg" "$(pt "$T/ptdest" 2>/dev/null)" "$T/ptdest/sbin/pkg"
@@ -1853,7 +1926,7 @@ freshrepo() {
 # --- plugin-source.sh: the plugin's directory at the approved commit -----------------------------
 conf 'os-alpha   Org/plugins br-alpha net/alpha yes' 'os-vendor  .           main     vendor/v  yes'
 # ps <dir> <commit> <args>: plugin-source.sh in <dir>
-ps() { (cd "$1" && ghenv env PACKAGES_CONF="$T/packages.conf" COMMIT="$2" bash "$root/scripts/plugin-source.sh" "${@:3}"); }
+ps() { (cd "$1" && ghenv env COMMIT="$2" bash "$S/plugin-source.sh" "${@:3}"); }
 rm -rf "$T/src"
 expect_eq "plugin-source: prints the plugin's directory" "$(ps "$T" "$c_one" os-alpha "$T/src" 2>/dev/null)" "$T/src/net/alpha"
 expect_eq "plugin-source: at the commit, not the branch head" "$(cat "$T/src/net/alpha/Makefile")" one
@@ -1876,9 +1949,9 @@ rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 # pv <dir> <package> <commit>: provenance.sh in <dir> on $od into $T/rev, the upstream PHP and
 # Python from PV_PHP and PV_PY (default 85 and 313)
 pv() {
-	(cd "$1" && ghenv env PACKAGES_CONF="$T/packages.conf" REPO_CONF="$T/repo.conf" COMMIT="$3" \
+	(cd "$1" && ghenv env COMMIT="$3" \
 		UPSTREAM_PHP="${PV_PHP-85}" UPSTREAM_PYTHON="${PV_PY-313}" GITHUB_REPOSITORY=Org/repo \
-		bash "$root/scripts/provenance.sh" "$2" "$od" "$T/rev")
+		bash "$S/provenance.sh" "$2" "$od" "$T/rev")
 }
 # pvwith <VAR=value> <pv arguments>: pv with PV_PHP or PV_PY set so
 pvwith() {
@@ -1943,7 +2016,7 @@ cp "$vp/alpha.pkg" "$po/os-alpha-1.0.pkg"
 printf 'Built from Org/plugins, branch br-alpha, commit %s.\n' "$commit" >"$po/source"
 printf 'abi: FreeBSD:15:amd64\nseries: 26.7\nfreebsd: 15.1-RELEASE-p3\nphp: 85\npython: 313\n' >"$po/build"
 rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
-pl() { REPO_CONF="$T/repo.conf" COMMIT="${PCOMMIT-$commit}" bash "$root/scripts/payload.sh" os-alpha "$po" "$vp/net/alpha"; }
+pl() { COMMIT="${PCOMMIT-$commit}" bash "$S/payload.sh" os-alpha "$po" "$vp/net/alpha"; }
 expect_eq "payload.sh: verify-payload.sh's verdict, the version from the file name" "$(pl 2>&1 | head -1)" "payload: OK (8 files)"
 mv "$po/os-alpha-1.0.pkg" "$po/os-alpha-1.1.pkg"
 expect_fail "payload.sh: a file name with another version than the Makefile's" pl
@@ -2076,8 +2149,8 @@ soset() {
 	printf 'built os-alpha-1.0.pkg %s\ncommit %s\n' "$(sum "$so/os-alpha-1.0.pkg")" "$commit" >"$sr/manifest"
 }
 smr() {
-	PACKAGES_CONF="$T/packages.conf" REPO_CONF="$T/repo.conf" COMMIT="${SCOMMIT-$commit}" PLUGIN_DIR="$vp/net/alpha" \
-		bash "$root/scripts/summary.sh" os-alpha "$so" "$sr"
+	COMMIT="${SCOMMIT-$commit}" PLUGIN_DIR="$vp/net/alpha" \
+		bash "$S/summary.sh" os-alpha "$so" "$sr"
 }
 # the post-install script holds backtick runs, one a line of its own, and a marker for "package text"
 soset '.scripts["post-install"] = "echo ``` and ```` PKGTEXT\n````\nexit 0"'

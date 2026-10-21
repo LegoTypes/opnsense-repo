@@ -20,6 +20,12 @@
 #     openssl dgst -sha256 -verify stamp.pub -signature stamp.sig
 # which is what is checked here right after each stamp is written.
 #
+# What signs and what is checked is this script's own checkout's, found from its location and
+# never from the working directory or the environment: the published key
+# (keys/legotypes-pkg-signing.pub), the fingerprints os-legotypes trusts, repo.conf and
+# packages.conf (through repo.sh and packages.sh beside it). The working directory holds only
+# what the job made: out/, .signing/ and site/.
+#
 # Environment: GITHUB_RUN_ID, required (the workflow run's id, digits only); PKG, the
 # pkg to run, by default pkg on PATH: the sign job passes the one scripts/pkg-tool.sh
 # built (pkg repo needs no FreeBSD host). PKG is resolved to an absolute path, and then
@@ -31,8 +37,9 @@
 # bsdtar reads no zstd, so on a Mac only the tests run it).
 set -eu
 
-PUB=keys/legotypes-pkg-signing.pub
-TRUSTED=vendor/legotypes/src/etc/pkg/fingerprints/LegoTypes/trusted
+here=$(dirname "$0")
+PUB=$here/../keys/legotypes-pkg-signing.pub
+TRUSTED=$here/../vendor/legotypes/src/etc/pkg/fingerprints/LegoTypes/trusted
 PKG=${PKG:-pkg}
 
 die() {
@@ -68,9 +75,9 @@ case $run in
 '' | *[!0-9]*) die "GITHUB_RUN_ID must be the workflow run's id, not \"$run\"" ;;
 esac
 published=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-target=$(sh scripts/repo.sh target)
-R=$(sh scripts/repo.sh tree)
-served=$(sh scripts/repo.sh serve)
+target=$(sh "$here/repo.sh" target)
+R=$(sh "$here/repo.sh" tree)
+served=$(sh "$here/repo.sh" serve)
 count=$(printf '%s\n' "$served" | wc -l)
 
 [ -f .signing/key ] || die "no signing key staged"
@@ -84,7 +91,7 @@ cat "$TRUSTED"/* 2>/dev/null | grep -qx "fingerprint: \"$fingerprint\"" ||
 	die "$PUB (sha256 $fingerprint) is not a fingerprint in $TRUSTED"
 mkdir -p "$R/All"
 cp out/*.pkg "$R/All/"
-catalogue=$(sh scripts/packages.sh catalogue)
+catalogue=$(sh "$here/packages.sh" catalogue)
 # signing_command mode (pkg-repo(8)): pkg feeds the sha256 (hex) of each catalogue
 # file, and a newline, to the command and stores the signature and the public key
 # beside it, so clients check the key's sha256 against their trusted fingerprints
@@ -93,13 +100,15 @@ catalogue=$(sh scripts/packages.sh catalogue)
 # exits non-zero with no answer; it stops before answering if openssl produced no
 # signature. pkg writes the line and then waits for the answer, so a plain read returns
 # at once (POSIX sh has no read timeout; dash refuses "read -t"). The lines are the
-# literal text of the signing script: $sum expands when it runs, not here.
+# literal text of the signing script: $sum expands when it runs, not here. The key's path is
+# quoted for it, as the script's location may hold any character.
+qpub=$(printf '%s\n' "$PUB" | sed "s/'/'\\\\''/g")
 # shellcheck disable=SC2016
 printf '%s\n' '#!/bin/sh' 'set -e' 'IFS= read -r sum' \
 	'case $sum in *[!0123456789abcdef]*) exit 1 ;; esac' '[ "${#sum}" -eq 64 ] || exit 1' \
 	'printf %s "$sum" | /usr/bin/openssl dgst -sign .signing/key -sha256 -binary >.signing/sig' \
 	'[ -s .signing/sig ]' 'echo SIGNATURE' 'cat .signing/sig' 'echo' \
-	'echo CERT' "cat $PUB" 'echo END' >.signing/sign.sh
+	'echo CERT' "cat '$qpub'" 'echo END' >.signing/sign.sh
 
 # verify <file> <signature> <key>: the signature over the file's sha256 hex verifies
 # with the key, as clients check a catalogue file and the stamp
@@ -122,7 +131,7 @@ stamp() {
 }
 
 for entry in $served; do
-	tree=$(sh scripts/repo.sh tree "$entry")
+	tree=$(sh "$here/repo.sh" tree "$entry")
 	mkdir -p "$tree/All"
 	# with one tree served the target holds exactly one package per catalogue row;
 	# otherwise each tree holds at most one (only what was released for it); none
