@@ -516,18 +516,18 @@ vp="$T/vp"
 vs="$vp/net/alpha/src"
 vu="$vp/stage/usr/local"
 vhash=${commit:0:9}
+vdef=($'PLUGIN_NAME=\t\talpha' $'PLUGIN_VERSION=\t\t1.0' $'PLUGIN_COMMENT=\t\tAlpha' \
+	$'PLUGIN_MAINTAINER=\tmaintainer@example.org' $'PLUGIN_WWW=\t\thttps://example.org/alpha/')
+vmk() { # vmk <line>...: net/alpha's Makefile, those lines and then the plugins.mk include
+	{
+		printf '%s\n' "$@"
+		printf '\n.include "../../Mk/plugins.mk"\n'
+	} >"$vp/net/alpha/Makefile"
+}
 vsrc() {
 	rm -rf "$vp"
 	mkdir -p "$vs/opnsense/scripts/Alpha" "$vs/opnsense/mvc/app/views/Alpha" "$vs/etc/pkg/repos" "$vs/man/man8"
-	cat >"$vp/net/alpha/Makefile" <<'EOF'
-PLUGIN_NAME=		alpha
-PLUGIN_VERSION=		1.0
-PLUGIN_COMMENT=		Alpha
-PLUGIN_MAINTAINER=	maintainer@example.org
-PLUGIN_WWW=		https://example.org/alpha/
-
-.include "../../Mk/plugins.mk"
-EOF
+	vmk "${vdef[@]}"
 	printf '#!/usr/local/bin/python3\nprint("alpha")\n' >"$vs/opnsense/scripts/Alpha/run.py"
 	chmod 755 "$vs/opnsense/scripts/Alpha/run.py"
 	printf '<h1>alpha</h1>\n' >"$vs/opnsense/mvc/app/views/Alpha/index.volt"
@@ -591,7 +591,8 @@ vpkg() {
 	[[ -z ${VPKG_TWICE:-} ]] || f+=("$VPKG_TWICE")
 	tar -cf - "${t[@]}" -C "$d" +COMPACT_MANIFEST +MANIFEST -C "$vp/stage" "${f[@]}" | zstd -q -c >"$vp/alpha.pkg"
 }
-vrun() { bash "$root/scripts/verify-payload.sh" "$vp/alpha.pkg" "$vp/net/alpha" os-alpha 1.0 FreeBSD:15:amd64 26.7 "$commit"; }
+# vrun: verify-payload.sh on $vp/alpha.pkg, the name and version from VNAME and VVER (default os-alpha, 1.0)
+vrun() { bash "$root/scripts/verify-payload.sh" "$vp/alpha.pkg" "$vp/net/alpha" "${VNAME:-os-alpha}" "${VVER:-1.0}" FreeBSD:15:amd64 26.7 "$commit"; }
 vpass() { # vpass <name>: verify-payload.sh accepts the package
 	local out
 	if out=$(vrun 2>&1); then ok; else bad "$1: expected a pass, got [$out]"; fi
@@ -599,6 +600,21 @@ vpass() { # vpass <name>: verify-payload.sh accepts the package
 vfail() { # vfail <name> <reason>: verify-payload.sh refuses it with exactly that reason
 	local err
 	if err=$(vrun 2>&1 >/dev/null); then bad "$1: expected failure"; else expect_eq "$1" "$err" "verify-payload.sh: $2"; fi
+}
+# vrepack [<bsdtar arguments>...]: $vp/alpha.pkg again with bsdtar from $vp/pkgroot's manifests (as vpkg
+# wrote them, or edited since) and the staged files, those arguments added: more members (an @<mtree spec>,
+# a path under the stage) or options (-n for a directory itself)
+vrepack() {
+	local f
+	mapfile -t f < <(cd "$vp/stage" && find usr -type f | sort)
+	(cd "$vp/stage" && bsdtar -cf - --format=pax --uname root --gname wheel --uid 0 --gid 0 -P -s ',^usr/,/usr/,' \
+		"$@" -C "$vp/pkgroot" +COMPACT_MANIFEST +MANIFEST -C "$vp/stage" "${f[@]}") | zstd -q -c >"$vp/alpha.pkg"
+}
+# vjson <file> <text>: <text> written before the first key of the JSON object in <file> (a repeated key)
+vjson() {
+	local j
+	j=$(<"$1")
+	printf '{%s,%s' "$2" "${j#\{}" >"$1"
 }
 vreset() { vsrc && vstage && vpkg; }
 volt=/usr/local/opnsense/mvc/app/views/Alpha/index.volt
@@ -649,7 +665,7 @@ vfail "payload: an executable packaged without its exec bit" "$runpy: mode 0644 
 vreset
 chmod 644 "$vu/opnsense/scripts/Alpha/run.py"
 vpkg --arg p "$runpy" '.files[$p].perm = "0755"'
-vfail "payload: the archive mode is what pkg installs" "$runpy: mode -rw-r--r-- in the archive, expected -rwxr-xr-x"
+vfail "payload: the archive mode is what pkg installs" "$runpy: mode 0644 in the archive, expected 0755"
 vreset
 chmod 755 "$vu/opnsense/mvc/app/views/Alpha/index.volt"
 vpkg
@@ -659,7 +675,7 @@ chmod 4755 "$vu/opnsense/scripts/Alpha/run.py"
 vpkg --arg p "$runpy" '.files[$p].perm = "4755"'
 vfail "payload: setuid in +MANIFEST" "$runpy: mode 4755 in +MANIFEST, expected 0755"
 vpkg
-vfail "payload: setuid in the archive" "$runpy: mode -rwsr-xr-x in the archive, expected -rwxr-xr-x"
+vfail "payload: setuid in the archive" "$runpy: mode 4755 in the archive, expected 0755"
 vreset
 vpkg --arg p "$runpy" '.files[$p].uname = "nobody"'
 vfail "payload: an owner other than root in +MANIFEST" "$runpy: owner nobody:wheel in +MANIFEST, expected root:wheel"
@@ -694,7 +710,9 @@ vpkg
 vfail "payload: a version file with an eleventh key" "version file: not exactly the ten product_* strings"
 vver '.product_website = "https://example.org/?a&b"' >"$vu/opnsense/version/alpha"
 vpkg
-vfail "payload: a substitution value sed would not copy literally" "version file: product_website holds a character sed would not copy literally"
+vfail "payload: a version file value other than the Makefile's" "version file: product_website is https://example.org/?a&b, expected https://example.org/alpha/"
+vmk "${vdef[@]}" 'PLUGIN_WWW= https://example.org/?a&b'
+vfail "payload: a Makefile value sed would not copy literally" "Makefile: PLUGIN_WWW holds &, = or %%, which sed would not copy literally"
 vreset
 vpkg '.annotations.product_tier = "2"'
 vfail "payload: annotations that differ from the version file" "+MANIFEST annotations differ from the version file"
@@ -713,7 +731,7 @@ vfail "payload: a manifest key it does not check" "+MANIFEST key lua_scripts is 
 VPKG_COMPACT='.deps = {"php85-curl": {"origin": "ftp/php85-curl", "version": "8.5.0"}}' vpkg
 vfail "payload: a compact manifest that differs" "+COMPACT_MANIFEST differs from +MANIFEST"
 vpkg '.scripts["post-install"] = "echo \u001b[2Kinstalled"'
-vfail "payload: a script with control characters" "script post-install holds control characters"
+vfail "payload: a script with control characters" "script post-install holds characters other than printable ASCII, tab and newline"
 vpkg --arg p "$volt" 'del(.files[$p])'
 vfail "payload: a source file +MANIFEST does not list" "src/opnsense/mvc/app/views/Alpha/index.volt is not packaged (as $volt)"
 printf '<?php\n' >"$vu/opnsense/extra.php"
@@ -728,15 +746,15 @@ vfail "payload: a +MANIFEST file the archive lacks" "/usr/local/opnsense/new.php
 vreset
 vpkg '.deps = {"php85-curl": {"origin": "ftp/php85-curl", "version": "8.5.0"}}'
 vfail "payload: dependencies without PLUGIN_DEPENDS" "dependencies (php85-curl) differ from PLUGIN_DEPENDS (none)"
-printf 'PLUGIN_DEPENDS=\t\tphp85-curl \\\n\t\t\tphp85-xml\n' >>"$vp/net/alpha/Makefile"
+vmk "${vdef[@]}" $'PLUGIN_DEPENDS=\t\tphp85-curl \\\n\t\t\tphp85-xml'
 vfail "payload: PLUGIN_DEPENDS without the dependencies" "dependencies (php85-curl) differ from PLUGIN_DEPENDS (php85-curl php85-xml)"
 vpkg '.deps = {"php85-curl": {"origin": "ftp/php85-curl", "version": "8.5.0"}, "php85-xml": {"origin": "textproc/php85-xml", "version": "8.5.0"}}'
 vpass "payload: dependencies equal to PLUGIN_DEPENDS"
 vreset
-printf 'PLUGIN_VARIANTS=\tA B\n' >>"$vp/net/alpha/Makefile"
-vfail "payload: plugin variants" "Makefile: PLUGIN_VARIANT and PLUGIN_VARIANTS are not supported"
+vmk "${vdef[@]}" $'PLUGIN_VARIANTS=\tA B'
+vfail "payload: plugin variants" "Makefile: PLUGIN_VARIANTS is not supported"
 vreset
-printf '.if defined(X)\nPLUGIN_DEPENDS=\tphp85-curl\n.endif\n' >>"$vp/net/alpha/Makefile"
+vmk "${vdef[@]}" '.if defined(X)' $'PLUGIN_DEPENDS=\tphp85-curl' '.endif'
 vfail "payload: a conditional Makefile" "Makefile: .if defined(X) is not supported"
 vreset
 mkdir -p "$vp/net/alpha/contrib"
@@ -744,6 +762,137 @@ vfail "payload: contrib/" "contrib/ is not supported"
 vreset
 printf 'alpha \377 %%%%PLUGIN_NAME%%%%\n' >"$vs/etc/alpha.conf.in"
 vfail "payload: an .in file that is not UTF-8" "src/etc/alpha.conf.in: not UTF-8 text, cannot substitute"
+vreset
+# every version file value from the Makefile, the ABI, the series and the commit (plugins.mk:44-122, defaults.mk:42-54)
+vreset
+vver '.product_arch = "i386"' >"$vu/opnsense/version/alpha"
+vpkg
+vfail "payload: product_arch other than the ABI's" "version file: product_arch is i386, expected amd64"
+vver '.product_conflicts = "os-alpha-devel os-beta"' >"$vu/opnsense/version/alpha"
+vpkg
+vfail "payload: product_conflicts other than plugins.mk's" "version file: product_conflicts is os-alpha-devel os-beta, expected os-alpha-devel"
+vver '.product_email = "other@example.org"' >"$vu/opnsense/version/alpha"
+vpkg
+vfail "payload: product_email other than PLUGIN_MAINTAINER" "version file: product_email is other@example.org, expected maintainer@example.org"
+vver '.product_tier = "1"' >"$vu/opnsense/version/alpha"
+vpkg
+vfail "payload: product_tier other than PLUGIN_TIER" "version file: product_tier is 1, expected 3"
+vver '.product_name = "beta"' >"$vu/opnsense/version/alpha"
+vpkg
+vfail "payload: product_name other than PLUGIN_NAME" "version file: product_name is beta, expected alpha"
+vreset
+vmk "${vdef[@]}" $'PLUGIN_CONFLICTS=\tzeta beta'
+vver '.product_conflicts = "os-alpha-devel os-beta os-beta-devel os-zeta os-zeta-devel"' >"$vu/opnsense/version/alpha"
+vpkg
+vpass "payload: PLUGIN_CONFLICTS as plugins.mk expands it"
+vreset
+vmk $'PLUGIN_NAME=\talpha' $'PLUGIN_VERSION=\t1.0' $'PLUGIN_COMMENT=\tAlpha'
+vver '.product_email = "N/A" | .product_website = "https://opnsense.org/"' >"$vu/opnsense/version/alpha"
+printf 'url: https://opnsense.org/\n' >"$vu/etc/pkg/repos/Alpha.conf.sample"
+vpkg
+vpass "payload: plugins.mk's defaults for PLUGIN_MAINTAINER, PLUGIN_WWW and PLUGIN_TIER"
+vreset
+vmk "${vdef[@]}" $'PLUGIN_TIER=\t2' $'PLUGIN_REVISION=\t1'
+vver '.product_tier = "2" | .product_version = "1.0_1"' >"$vu/opnsense/version/alpha"
+printf 'alpha 1.0_1 %s alpha %%%%PLUGIN_UNKNOWN%%%%\n' "$vhash" >"$vu/etc/alpha.conf"
+vpkg '.version = "1.0_1"'
+VVER=1.0_1 vpass "payload: PLUGIN_TIER and PLUGIN_REVISION from the Makefile, the .in substituted with them"
+vfail "payload: a version other than the Makefile's" "the version 1.0 is not 1.0_1, as the Makefile gives it"
+vreset
+vmk "${vdef[@]}" $'PLUGIN_REVISION=\t0'
+vpass "payload: PLUGIN_REVISION 0 adds no _0"
+VNAME=os-beta vfail "payload: a name other than the Makefile's" "the name os-beta is not os-alpha, as the Makefile names it"
+vmk "${vdef[@]}" 'PLUGIN_COMMENT= costs $$5'
+vfail "payload: a Makefile value make would expand" 'Makefile: PLUGIN_COMMENT holds $, `, " or \, which make or sh would expand'
+vmk "${vdef[@]}" 'PLUGIN_COMMENT= say "hi"'
+vfail "payload: a Makefile value the shell would unquote" 'Makefile: PLUGIN_COMMENT holds $, `, " or \, which make or sh would expand'
+vmk "${vdef[@]}" 'PLUGIN_COMMENT= a\tb'
+vfail "payload: a Makefile value with a backslash" 'Makefile: PLUGIN_COMMENT holds $, `, " or \, which make or sh would expand'
+vmk "${vdef[@]}" $'PLUGIN_DEVEL=\tyes'
+vfail "payload: a Makefile variable plugins.mk reads that is not modelled" "Makefile: PLUGIN_DEVEL is not supported"
+vmk "${vdef[@]}"
+printf 'PLUGIN_TIER=\t2\n' >>"$vp/net/alpha/Makefile"
+vfail "payload: an assignment after the include" "Makefile: PLUGIN_TIER is set after the plugins.mk include"
+vmk $'PLUGIN_VERSION=\t1.0' $'PLUGIN_COMMENT=\tAlpha'
+vfail "payload: no PLUGIN_NAME" "Makefile: PLUGIN_NAME is not set"
+printf 'PLUGIN_NAME=\talpha\n' >"$vp/net/alpha/Makefile"
+vfail "payload: no plugins.mk include" 'Makefile: no .include "../../Mk/plugins.mk"'
+
+# repeated JSON keys: jq keeps the last, pkg (libucl) takes them all
+vreset
+vjson "$vp/pkgroot/+MANIFEST" '"scripts":{"pre-install":"echo hidden"}'
+vrepack
+vfail "payload: a second scripts object" "+MANIFEST repeats a key"
+vreset
+vpkg '.deps = {}'
+vjson "$vp/pkgroot/+MANIFEST" '"deps":{"evil":{"origin":"x/evil","version":"1"}}'
+vrepack
+vfail "payload: a second deps object" "+MANIFEST repeats a key"
+vreset
+j=$(<"$vp/pkgroot/+MANIFEST")
+printf '%s' "${j/\"scripts\":\{/\"scripts\":\{\"pre-deinstall\":\"echo hidden\",}" >"$vp/pkgroot/+MANIFEST"
+vrepack
+vfail "payload: a repeated script name inside scripts" "+MANIFEST repeats a key"
+vreset
+vjson "$vp/pkgroot/+COMPACT_MANIFEST" '"name":"os-evil"'
+vrepack
+vfail "payload: a repeated key in +COMPACT_MANIFEST" "+COMPACT_MANIFEST repeats a key"
+vreset
+vjson "$vu/opnsense/version/alpha" '"product_tier":"1"'
+vpkg
+vfail "payload: a repeated key in the version file" "version file repeats a key"
+vreset
+j=$(<"$vp/pkgroot/+MANIFEST")
+printf '%s' "${j/\"desc\":\"Alpha\"/\"desc\":\"Alph$'\377'\"}" >"$vp/pkgroot/+MANIFEST"
+vrepack
+vfail "payload: a +MANIFEST that is not UTF-8" "+MANIFEST is not UTF-8 text"
+
+# script names and text
+vreset
+vpkg '.scripts["post-install\n```\nrm -rf /"] = "x"'
+vfail "payload: a script name pkg does not run" 'script "post-install\n```\nrm -rf /" is not a pkg script name'
+vpkg '.scripts["pre-upgrade"] = "x"'
+vfail "payload: pre-upgrade, not a pkg script name" 'script "pre-upgrade" is not a pkg script name'
+vpkg '.scripts["post-install"] = "echo ‮evil"'
+vfail "payload: a script with a bidi override" "script post-install holds characters other than printable ASCII, tab and newline"
+vpkg '.scripts["post-install"] = "echo %72m"'
+vfail "payload: a %-escape pkg would decode" "script post-install holds a %-escape other than %25, which pkg would decode"
+vpkg '.scripts = {"post-install": "echo 100%25"}'
+expect_eq "payload: a script is shown as pkg decodes it" "$(vrun 2>&1 | tail -2)" $'script post-install:\n\techo 100%'
+
+# member types and flags, from libarchive's own view
+vreset
+mv "$vu/opnsense/mvc/app/views/Alpha/index.volt" "$vp/index.volt"
+printf '#mtree\nusr/local/opnsense/mvc/app/views/Alpha/index.volt type=file mode=0644 uname=root gname=wheel flags=nodump contents=%s\n' \
+	"$vp/index.volt" >"$vp/spec"
+vrepack "@$vp/spec"
+vfail "payload: file flags, which tar -tv does not show and pkg applies" "archive member $volt has file flags (nodump)"
+vreset
+rm "$vu/opnsense/mvc/app/views/Alpha/index.volt"
+ln -s ../../../scripts/Alpha/run.py "$vu/opnsense/mvc/app/views/Alpha/index.volt"
+vrepack usr/local/opnsense/mvc/app/views/Alpha/index.volt
+vfail "payload: a symbolic link at a packaged path" "archive member $volt is a symbolic link, not a regular file"
+vreset
+mkdir -p "$vu/evil /usr/local/opnsense/mvc/app/views/Alpha"
+mv "$vu/opnsense/mvc/app/views/Alpha/index.volt" "$vu/evil /usr/local/opnsense/mvc/app/views/Alpha/index.volt"
+ln "$vu/evil /usr/local/opnsense/mvc/app/views/Alpha/index.volt" "$vu/opnsense/mvc/app/views/Alpha/index.volt"
+vrepack
+vfail "payload: a hard link at a packaged path, its target ending in that path" "archive member $volt is a hard link, not a regular file"
+vreset
+vrepack -n usr/local/opnsense
+vfail "payload: a directory member" "archive member /usr/local/opnsense/ is a directory, not a regular file"
+vreset
+printf '#mtree\n./usr/local/opnsense/mvc/app/views/Alpha/index.volt type=file mode=0644 uname=root gname=wheel contents=%s\n' \
+	"$vu/opnsense/mvc/app/views/Alpha/index.volt" >"$vp/spec"
+vrepack "@$vp/spec"
+vfail "payload: a ./usr/local alias of a packaged file" "archive member ./usr/local/opnsense/mvc/app/views/Alpha/index.volt is not in +MANIFEST"
+printf '#mtree\nusr/local/../usr/local/opnsense/mvc/app/views/Alpha/index.volt type=file mode=0644 uname=root gname=wheel contents=%s\n' \
+	"$vu/opnsense/mvc/app/views/Alpha/index.volt" >"$vp/spec"
+vrepack "@$vp/spec"
+vfail "payload: a /usr/local/.. alias of a packaged file" "archive member /usr/local/../usr/local/opnsense/mvc/app/views/Alpha/index.volt is not in +MANIFEST"
+vreset
+vrepack
+vpass "payload: the same package written by bsdtar as pax"
 vreset
 expect_fail "payload: a commit that is not 40 hex digits" bash "$root/scripts/verify-payload.sh" "$vp/alpha.pkg" "$vp/net/alpha" os-alpha 1.0 FreeBSD:15:amd64 26.7 "$vhash"
 expect_fail "payload: usage" bash "$root/scripts/verify-payload.sh" "$vp/alpha.pkg"

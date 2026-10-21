@@ -5,29 +5,43 @@
 # regular file under src/ (but top-level dot files, as "find *" skips them) lands
 # under /usr/local/, a .in file sed-substituted and without .in, a .shadow file as
 # .sample (.shadow.in both), a man/ file gzipped; modes are kept (0755 or 0644, a
-# man page 0644); /usr/local/opnsense/version/<name without os-> is rendered from
-# Templates/version and its ten values are the substitution map.
+# man page 0644); /usr/local/opnsense/version/<PLUGIN_NAME> is rendered from
+# Templates/version. Its ten values, which are also the .in substitutions, are
+# derived here as plugins.mk derives them (plugins.mk:39-122, defaults.mk:42-54,
+# with build-package.sh's PLUGIN_DEVEL= and PLUGIN_ABI=<series>): PLUGIN_NAME,
+# PLUGIN_VERSION[_PLUGIN_REVISION], PLUGIN_MAINTAINER (N/A), PLUGIN_WWW
+# (https://opnsense.org/), PLUGIN_TIER (3) and PLUGIN_CONFLICTS from the Makefile,
+# the arch from the ABI, product_abi from the series, the hash from the commit (as
+# Scripts/version.sh abbreviates it, 9 characters).
 # Checks, failing on the first problem:
-# 1. +MANIFEST: only the keys pkg create writes for a plugin; +COMPACT_MANIFEST is
-#    it without files and scripts; name, version, abi and annotation product_abi
-#    (the series) as given; dependency names equal PLUGIN_DEPENDS in the Makefile.
-# 2. The version file: exactly the ten product_* strings, product_hash the commit as
-#    Scripts/version.sh abbreviates it (9 characters), product_version, product_id,
-#    product_name and product_abi as expected; the annotations repeat it.
+# 0. The Makefile: plain assignments to the variables modelled, then the include;
+#    <name> is os-<PLUGIN_NAME> and <version> the version it gives. The archive, as
+#    libarchive (bsdtar, the parser pkg installs with) reads it: each member once
+#    and a regular file; any message from bsdtar is a failure.
+# 1. +MANIFEST, +COMPACT_MANIFEST: UTF-8 JSON with no key repeated (jq keeps the
+#    last, pkg takes them all); only the keys pkg create writes for a plugin; the
+#    compact one is +MANIFEST without files and scripts; name, version, abi and
+#    annotation product_abi as given; dependency names equal PLUGIN_DEPENDS; scripts
+#    only under pkg's script names, printable ASCII, tab and newline, no %-escape
+#    but %25 (pkg url-decodes scripts).
+# 2. The version file: no key repeated, exactly the derived ten values; the
+#    annotations repeat it.
 # 3. The files: +MANIFEST's map one to one onto src/, and the archive holds exactly
-#    those and the two manifests, each once, regular files.
+#    those and the two manifests.
 # 4. Each file: mode and owner (root:wheel) in +MANIFEST and in the archive, which
-#    is what pkg installs; the +MANIFEST sum (1$ sha256 or 2$ BLAKE2b in pkg's
-#    base32) matches the content; the content equals the source after substitution
-#    (.in) and gunzip (man/).
+#    is what pkg installs, and no file flags; the +MANIFEST sum (1$ sha256 or 2$
+#    BLAKE2b in pkg's base32) matches the content; the content equals the source
+#    after substitution (.in) and gunzip (man/).
 # On success prints "payload: OK (<n> files)" (<n> counts the version file) and then
-# each install script, its name on a line ("script post-install:") and its lines
-# indented by a tab; on the first problem exits 1 with the reason on stderr.
-# Not modelled, so refused: contrib/, plugin variants, Makefile lines other than
-# plain assignments and the plugins.mk include, a man page with .shadow, file names
-# outside [A-Za-z0-9._+,@=~-], a .in file that is not UTF-8, and substitution
-# values sed would not copy literally. Needs bash 4, jq, tar (bsdtar or GNU tar)
-# with zstd, sha256sum, openssl (BLAKE2b), gzip and cmp.
+# each install script as pkg will run it (url-decoded), its name on a line
+# ("script post-install:") and its lines indented by a tab; on the first problem
+# exits 1 with the reason on stderr.
+# Not modelled, so refused: contrib/, Makefile variables other than those above
+# and PLUGIN_COMMENT, PLUGIN_DEPENDS and PLUGIN_LICENSE, values holding $, `, " or
+# \ (make or sh would expand them) or &, = or %% (sed would not copy them
+# literally), a man page with .shadow, file names outside [A-Za-z0-9._+,@=~-], and
+# a .in file that is not UTF-8. Needs bash 4, jq, bsdtar (libarchive; on Ubuntu
+# the libarchive-tools package) with zstd, sha256sum, openssl (BLAKE2b), gzip, cmp.
 set -euo pipefail
 
 die() {
@@ -38,10 +52,9 @@ die() {
 [[ $# -eq 7 ]] || die "usage: verify-payload.sh <pkg> <plugin dir> <name> <version> <abi> <series> <commit>"
 pkg=$1 dir=${2%/} name=$3 version=$4 abi=$5 series=$6 commit=$7
 [[ $commit =~ ^[0-9a-f]{40}$ ]] || die "the commit must be 40 lowercase hex digits: $commit"
-[[ $name == os-?* ]] || die "the name must start with os-: $name"
+[[ $abi =~ ^FreeBSD:[0-9]+:[a-z0-9_]+$ ]] || die "the ABI must read FreeBSD:<major>:<arch>: $abi"
+[[ $series =~ ^[0-9]+\.[0-9]+$ ]] || die "the series must read <year>.<month>: $series"
 hash=${commit:0:9}
-pname=${name#os-}
-vfile=/usr/local/opnsense/version/$pname
 [[ -f $pkg ]] || die "$pkg: no such file"
 [[ -f $dir/Makefile ]] || die "$dir: no Makefile"
 [[ -d $dir/src ]] || die "$dir: no src/"
@@ -50,30 +63,118 @@ vfile=/usr/local/opnsense/version/$pname
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# the archive's members, as tar prints them (pkg writes absolute names, which bsdtar
-# lists with their / and GNU tar without), keyed by the name without a leading /
-tar -tf "$pkg" >"$work/list" 2>/dev/null || die "$pkg: not a readable archive"
-tar -tvf "$pkg" >"$work/verbose" 2>/dev/null || die "$pkg: not a readable archive"
+# 0. the Makefile: lines joined as make joins continuations, plain assignments, then the include
+awk '{ while (/\\$/) { sub(/[ \t]*\\$/, ""); l = $0; if ((getline n) <= 0) break; sub(/^[ \t]+/, "", n); $0 = l " " n } print }' \
+	"$dir/Makefile" >"$work/makefile" || die "cannot read $dir/Makefile"
+modelled=" PLUGIN_NAME PLUGIN_VERSION PLUGIN_REVISION PLUGIN_COMMENT PLUGIN_MAINTAINER PLUGIN_WWW PLUGIN_TIER
+	PLUGIN_CONFLICTS PLUGIN_DEPENDS PLUGIN_LICENSE "
+declare -A mk=()
+included=''
+while IFS= read -r l; do
+	case $l in
+	'' | '#'*) continue ;;
+	'.include "../../Mk/plugins.mk"')
+		[[ -z $included ]] || die "Makefile: the plugins.mk include is repeated"
+		included=1
+		continue
+		;;
+	esac
+	[[ $l =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*([?+:!]?)=(.*)$ ]] || die "Makefile: $l is not supported"
+	var=${BASH_REMATCH[1]} op=${BASH_REMATCH[2]} val=${BASH_REMATCH[3]%%#*}
+	[[ -z $included ]] || die "Makefile: $var is set after the plugins.mk include"
+	[[ $modelled == *[[:space:]]${var}[[:space:]]* ]] || die "Makefile: $var is not supported"
+	[[ $op != '!' ]] || die "Makefile: $var is set with !=, which is not supported"
+	case $val in
+	*'$'* | *'`'* | *'"'* | *\\*) die "Makefile: $var holds \$, \`, \" or \\, which make or sh would expand" ;;
+	esac
+	val=${val#"${val%%[![:space:]]*}"}
+	val=${val%"${val##*[![:space:]]}"}
+	case $op in
+	'+') mk[$var]=${mk[$var]:+${mk[$var]} }$val ;;
+	'?') [[ -n ${mk[$var]+set} ]] || mk[$var]=$val ;;
+	*) mk[$var]=$val ;;
+	esac
+done <"$work/makefile"
+[[ -n $included ]] || die 'Makefile: no .include "../../Mk/plugins.mk"'
+for v in PLUGIN_NAME PLUGIN_VERSION PLUGIN_COMMENT; do
+	[[ -n ${mk[$v]:-} ]] || die "Makefile: $v is not set"
+done
+for v in PLUGIN_NAME PLUGIN_VERSION PLUGIN_REVISION PLUGIN_TIER; do
+	[[ -z ${mk[$v]:-} || ${mk[$v]} =~ ^[A-Za-z0-9._+-]+$ ]] || die "Makefile: $v is not one plain word"
+done
+for v in PLUGIN_MAINTAINER PLUGIN_WWW PLUGIN_CONFLICTS; do
+	case ${mk[$v]:-} in
+	*'&'* | *'='* | *'%%'*) die "Makefile: $v holds &, = or %%, which sed would not copy literally" ;;
+	esac
+done
+pname=${mk[PLUGIN_NAME]}
+pkgversion=${mk[PLUGIN_VERSION]}
+[[ ${mk[PLUGIN_REVISION]:-0} == 0 ]] || pkgversion+=_${mk[PLUGIN_REVISION]}
+[[ $name == "os-$pname" ]] || die "the name $name is not os-$pname, as the Makefile names it"
+[[ $version == "$pkgversion" ]] || die "the version $version is not $pkgversion, as the Makefile gives it"
+vfile=/usr/local/opnsense/version/$pname
+# plugins.mk:77-79,110,114: each conflict and its -devel, the plugin's own -devel, os- before each, sorted
+read -ra words <<<"${mk[PLUGIN_CONFLICTS]:-}"
+clist=()
+for c in "${words[@]}"; do
+	[[ $c =~ ^[A-Za-z0-9._+-]+$ ]] || die "Makefile: PLUGIN_CONFLICTS holds $c, not a plain word"
+	clist+=("os-$c" "os-$c-devel")
+done
+clist+=("os-$pname-devel")
+conflicts=$(printf '%s\n' "${clist[@]}" | LC_ALL=C sort | paste -sd' ' -)
+want=$(jq -cn --arg abi "$series" --arg arch "${abi##*:}" --arg conflicts "$conflicts" \
+	--arg email "${mk[PLUGIN_MAINTAINER]:-N/A}" --arg hash "$hash" --arg id "$name" --arg name "$pname" \
+	--arg tier "${mk[PLUGIN_TIER]:-3}" --arg version "$pkgversion" --arg www "${mk[PLUGIN_WWW]:-https://opnsense.org/}" \
+	'{product_abi: $abi, product_arch: $arch, product_conflicts: $conflicts, product_email: $email,
+	product_hash: $hash, product_id: $id, product_name: $name, product_tier: $tier, product_version: $version,
+	product_website: $www}')
+read -ra words <<<"${mk[PLUGIN_DEPENDS]:-}"
+want_deps=$(jq -rn '$ARGS.positional | unique | join(" ")' --args "${words[@]}")
+
+# 0. the archive: names, types and attributes as libarchive reads them; bsdtar must say nothing on stderr
+bt() { # bt <output file> <bsdtar arguments>...
+	local out=$1
+	shift
+	bsdtar "$@" >"$out" 2>"$work/err" || die "$pkg: bsdtar failed: $(head -n 1 "$work/err")"
+	[[ ! -s $work/err ]] || die "$pkg: bsdtar: $(head -n 1 "$work/err")"
+}
+bt "$work/list" -tf "$pkg"
+bt "$work/verbose" -tvf "$pkg"
 mapfile -t listed <"$work/list"
 mapfile -t verbose <"$work/verbose"
 [[ ${#listed[@]} -gt 0 && ${#listed[@]} -eq ${#verbose[@]} ]] || die "$pkg: not a readable archive"
-declare -A member=() line=()
+declare -A member=()
 for i in "${!listed[@]}"; do
 	m=${listed[i]}
 	k=${m#/}
-	[[ -z ${member[$k]:-} ]] || die "archive member /$k appears twice"
+	[[ -z ${member[$k]:-} ]] || die "archive member $m appears twice"
 	member[$k]=$m
-	line[$k]=${verbose[i]}
+	case ${verbose[i]:0:1} in
+	-) ;;
+	h) die "archive member $m is a hard link, not a regular file" ;;
+	l) die "archive member $m is a symbolic link, not a regular file" ;;
+	d) die "archive member $m is a directory, not a regular file" ;;
+	*) die "archive member $m is not a regular file" ;;
+	esac
 done
 [[ -n ${member[+MANIFEST]:-} && -n ${member[+COMPACT_MANIFEST]:-} ]] || die "$pkg: lacks +MANIFEST or +COMPACT_MANIFEST"
-extract() { tar -xOf "$pkg" "${member[$1]}" 2>/dev/null; }
+extract() { bt "$2" -xOPf "$pkg" "${member[$1]}"; }
+# json <file> <what>: one JSON value, UTF-8 (jq would read invalid bytes as U+FFFD), no key repeated (the
+# streamed leaves of the text outnumber those of the parsed value exactly when a key repeats)
+json() {
+	jq -es 'length == 1' "$1" >/dev/null 2>&1 || die "$2 is not one JSON value"
+	jq -Rsj . "$1" | cmp -s - "$1" || die "$2 is not UTF-8 text"
+	[[ $(jq -n --stream '[inputs | select(length == 2)] | length' "$1") == $(jq '[tostream | select(length == 2)] | length' "$1") ]] ||
+		die "$2 repeats a key"
+}
 is() { [[ $2 == "$3" ]] || die "$1 is $2, expected $3"; }
 
 # 1. +MANIFEST
-extract +MANIFEST >"$work/manifest" || die "cannot read +MANIFEST"
-extract +COMPACT_MANIFEST >"$work/compact" || die "cannot read +COMPACT_MANIFEST"
-jq -es 'length == 1 and (.[0] | type == "object")' "$work/manifest" >/dev/null 2>&1 || die "+MANIFEST is not one JSON object"
-jq -es 'length == 1' "$work/compact" >/dev/null 2>&1 || die "+COMPACT_MANIFEST is not one JSON value"
+extract +MANIFEST "$work/manifest"
+extract +COMPACT_MANIFEST "$work/compact"
+json "$work/manifest" +MANIFEST
+json "$work/compact" +COMPACT_MANIFEST
+jq -e 'type == "object"' "$work/manifest" >/dev/null || die "+MANIFEST is not a JSON object"
 M=$(jq -c . "$work/manifest")
 unexpected=$(jq -r '(keys - ["abi", "annotations", "arch", "categories", "comment", "deps", "desc", "files", "flatsize",
 	"licenselogic", "licenses", "maintainer", "name", "origin", "prefix", "scripts", "version", "www"])[0] // empty' <<<"$M")
@@ -86,32 +187,16 @@ is "+MANIFEST abi" "$(jq -r '.abi | strings' <<<"$M")" "$abi"
 is "+MANIFEST product_abi" "$(jq -r '.annotations.product_abi? | strings' <<<"$M")" "$series"
 jq -e '.scripts // {} | type == "object" and all(.[]; type == "string")' <<<"$M" >/dev/null ||
 	die "+MANIFEST scripts are not an object of strings"
+# pkg_manifest.c script_type_str: the names pkg runs; pkg url-decodes each script, and pkg create
+# encodes only % (as %25) and bytes beyond ASCII
+v=$(jq -r '.scripts // {} | keys - ["pre-install", "install", "post-install", "pre-deinstall", "deinstall",
+	"post-deinstall"] | .[0] // empty | tojson' <<<"$M")
+[[ -z $v ]] || die "script $v is not a pkg script name"
 v=$(jq -r '.scripts // {} | to_entries
-	| map(select(.value | explode | any(. < 9 or (. > 10 and . < 32) or . == 127)))[0].key // empty' <<<"$M")
-[[ -z $v ]] || die "script $v holds control characters"
-
-# PLUGIN_DEPENDS from the Makefile, which may hold only plain assignments and the include
-awk '{ while (/\\$/) { sub(/\\$/, " "); l = $0; if ((getline n) <= 0) break; $0 = l n } print }' \
-	"$dir/Makefile" >"$work/makefile" || die "cannot read $dir/Makefile"
-plugin_depends='' deps_set=''
-while IFS= read -r l; do
-	case $l in
-	'' | '#'* | '.include "../../Mk/plugins.mk"') continue ;;
-	esac
-	[[ $l =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*([?+:!]?)=(.*)$ ]] || die "Makefile: $l is not supported"
-	var=${BASH_REMATCH[1]} op=${BASH_REMATCH[2]} val=${BASH_REMATCH[3]%%#*}
-	[[ $var != PLUGIN_VARIANT && $var != PLUGIN_VARIANTS ]] || die "Makefile: PLUGIN_VARIANT and PLUGIN_VARIANTS are not supported"
-	[[ $var == PLUGIN_DEPENDS ]] || continue
-	[[ $op != '!' && $val != *'$'* ]] || die "Makefile: PLUGIN_DEPENDS is not a plain list"
-	case $op in
-	'+') plugin_depends+=" $val" ;;
-	'?') [[ -n $deps_set ]] || plugin_depends=$val ;;
-	*) plugin_depends=$val ;;
-	esac
-	deps_set=1
-done <"$work/makefile"
-read -ra words <<<"$plugin_depends"
-want_deps=$(jq -rn '$ARGS.positional | unique | join(" ")' --args "${words[@]}")
+	| map(select(.value | explode | any(. != 9 and . != 10 and (. < 32 or . > 126))))[0].key // empty' <<<"$M")
+[[ -z $v ]] || die "script $v holds characters other than printable ASCII, tab and newline"
+v=$(jq -r '.scripts // {} | to_entries | map(select(.value | test("%(?!25)")))[0].key // empty' <<<"$M")
+[[ -z $v ]] || die "script $v holds a %-escape other than %25, which pkg would decode"
 have_deps=$(jq -r '.deps // {} | keys | join(" ")' <<<"$M")
 [[ $have_deps == "$want_deps" ]] ||
 	die "dependencies (${have_deps:-none}) differ from PLUGIN_DEPENDS (${want_deps:-none})"
@@ -119,29 +204,22 @@ have_deps=$(jq -r '.deps // {} | keys | join(" ")' <<<"$M")
 # 2. the version file
 jq -e --arg v "$vfile" '.files | type == "object" and has($v)' <<<"$M" >/dev/null || die "+MANIFEST lists no $vfile"
 [[ -n ${member[${vfile#/}]:-} ]] || die "$vfile is not in the archive"
-extract "${vfile#/}" >"$work/version" || die "cannot extract $vfile"
-keys='["product_abi", "product_arch", "product_conflicts", "product_email", "product_hash", "product_id",
-	"product_name", "product_tier", "product_version", "product_website"]'
-jq -es --argjson k "$keys" 'length == 1 and (.[0] | type == "object" and keys == $k and all(.[]; type == "string"))' \
-	"$work/version" >/dev/null 2>&1 || die "version file: not exactly the ten product_* strings"
+extract "${vfile#/}" "$work/version"
+json "$work/version" "version file"
+jq -e --argjson w "$want" 'type == "object" and keys == ($w | keys) and all(.[]; type == "string")' \
+	"$work/version" >/dev/null || die "version file: not exactly the ten product_* strings"
 V=$(jq -c . "$work/version")
-vget() { jq -r --arg k "$1" '.[$k]' <<<"$V"; }
-is "version file: product_hash" "$(vget product_hash)" "$hash"
-is "version file: product_version" "$(vget product_version)" "$version"
-is "version file: product_id" "$(vget product_id)" "$name"
-is "version file: product_name" "$(vget product_name)" "$pname"
-is "version file: product_abi" "$(vget product_abi)" "$series"
-# sed takes each value as the replacement of s=%%TOKEN%%=value=g, so only plain text is copied as is
-v=$(jq -r 'to_entries | map(select(.value | test("[&\\\\=\n]|%%")))[0].key // empty' <<<"$V")
-[[ -z $v ]] || die "version file: $v holds a character sed would not copy literally"
+for k in $(jq -r 'keys[]' <<<"$want"); do
+	is "version file: $k" "$(jq -r --arg k "$k" '.[$k]' <<<"$V")" "$(jq -r --arg k "$k" '.[$k]' <<<"$want")"
+done
 jq -e --argjson v "$V" '.annotations | type == "object" and del(.FreeBSD_version) == $v' <<<"$M" >/dev/null ||
 	die "+MANIFEST annotations differ from the version file"
-# the tokens in Mk/defaults.mk REPLACEMENTS order (sed applies them in turn); PLUGIN_VARIANT is
-# empty without variants
+# the tokens in Mk/defaults.mk REPLACEMENTS order (sed applies them in turn), with the derived values;
+# PLUGIN_VARIANT is empty without variants
 map=$(jq -c '[["PLUGIN_ABI", .product_abi], ["PLUGIN_ARCH", .product_arch], ["PLUGIN_CONFLICTS", .product_conflicts],
 	["PLUGIN_HASH", .product_hash], ["PLUGIN_MAINTAINER", .product_email], ["PLUGIN_NAME", .product_name],
 	["PLUGIN_PKGNAME", .product_id], ["PLUGIN_PKGVERSION", .product_version], ["PLUGIN_TIER", .product_tier],
-	["PLUGIN_VARIANT", ""], ["PLUGIN_WWW", .product_website]] | map(["%%" + .[0] + "%%", .[1]])' <<<"$V")
+	["PLUGIN_VARIANT", ""], ["PLUGIN_WWW", .product_website]] | map(["%%" + .[0] + "%%", .[1]])' <<<"$want")
 
 # 3. the file set: what install makes of src/, keyed by installed path
 (cd "$dir/src" && find . -type f -print0) >"$work/found" || die "cannot list $dir/src"
@@ -181,13 +259,35 @@ done
 mapfile -t members < <(printf '%s\n' "${!member[@]}" | LC_ALL=C sort)
 for k in "${members[@]}"; do
 	[[ $k == +MANIFEST || $k == +COMPACT_MANIFEST || -n ${listed_in_manifest[/$k]:-} ]] ||
-		die "archive member /$k is not in +MANIFEST"
+		die "archive member ${member[$k]} is not in +MANIFEST"
 done
 for p in "${files[@]}"; do
 	[[ -n ${member[${p#/}]:-} ]] || die "$p is not in the archive"
 done
 
-# 4. each file: mode, owner, sum, content
+# 4. each member's attributes as libarchive gives them to pkg (mtree keywords, names escaped as \ooo);
+# every member now has a plain name of its own, so the listing maps onto them one to one
+bt "$work/mtree" -cPf - --format=mtree --options '!all,type,mode,uname,gname,flags,link' "@$pkg"
+declare -A attrs=()
+while IFS= read -r l; do
+	[[ $l != '#'* ]] || continue
+	[[ $l != /* ]] || die "$pkg: unexpected listing line $l"
+	n=${l%% *}
+	printf -v n '%b' "${n//\\/\\0}"
+	n=${n#./}
+	[[ -n ${member[$n]:-} && -z ${attrs[$n]:-} ]] || die "$pkg: the archive's listings disagree on $n"
+	attrs[$n]=" ${l#* } "
+	[[ ${attrs[$n]} != *' flags='* ]] || { v=${attrs[$n]#* flags=}; die "archive member ${member[$n]} has file flags (${v%% *})"; }
+done <"$work/mtree"
+[[ ${#attrs[@]} -eq ${#member[@]} ]] || die "$pkg: the archive's listings disagree"
+attr() { # attr <member> <keyword>: its value, or none
+	local a=${attrs[$1]}
+	if [[ $a == *" $2="* ]]; then a=${a#* "$2"=} && echo "${a%% *}"; else echo none; fi
+}
+for k in +MANIFEST +COMPACT_MANIFEST; do
+	[[ $(attr "$k" type) == file && $(attr "$k" link) == none ]] || die "archive member $k is not a regular file"
+done
+
 b32=ybndrfg8ejkmcpqxot1uwisza345h769
 blake2() { # pkg's 2$ sum: BLAKE2b-512, base32 taking the bits least significant first
 	local acc=0 n=0 out='' b
@@ -210,18 +310,17 @@ for p in "${files[@]}"; do
 	else
 		perm=0644
 	fi
-	mode=-rw-r--r--
-	[[ $perm == 0755 ]] && mode=-rwxr-xr-x
 	v=$(jq -r --arg p "$p" '.files[$p].perm // empty' <<<"$M")
 	[[ $v == "$perm" ]] || die "$p: mode ${v:-none} in +MANIFEST, expected $perm"
-	read -r amode f2 f3 f4 _ <<<"${line[$k]}"
-	[[ ${line[$k]} == *" ${member[$k]}" ]] || die "archive member $p: cannot read its listing"
-	[[ $amode == "$mode" ]] || die "$p: mode $amode in the archive, expected $mode"
+	[[ $(attr "$k" type) == file && $(attr "$k" link) == none ]] || die "archive member $p is not a regular file"
+	v=$(attr "$k" mode)
+	while [[ ${#v} -lt 4 ]]; do v=0$v; done
+	[[ $v == "$perm" ]] || die "$p: mode $v in the archive, expected $perm"
 	v=$(jq -r --arg p "$p" '.files[$p] | "\(.uname // ""):\(.gname // "")"' <<<"$M")
 	[[ $v == root:wheel ]] || die "$p: owner $v in +MANIFEST, expected root:wheel"
-	if [[ $f2 == */* ]]; then v=${f2/\//:}; else v=$f3:$f4; fi
+	v=$(attr "$k" uname):$(attr "$k" gname)
 	[[ $v == root:wheel ]] || die "$p: owner $v in the archive, expected root:wheel"
-	extract "$k" >"$work/packaged" || die "cannot extract $p"
+	extract "$k" "$work/packaged"
 	v=$(jq -r --arg p "$p" '.files[$p].sum // ""' <<<"$M")
 	case $v in
 	1\$*) got=$(sha256sum <"$work/packaged" | cut -d' ' -f1) ;;
@@ -245,4 +344,5 @@ for p in "${files[@]}"; do
 done
 
 echo "payload: OK (${#files[@]} files)"
-jq -r '.scripts // {} | to_entries | sort_by(.key)[] | "script \(.key):", (.value | split("\n")[] | "\t" + .)' <<<"$M"
+jq -r '.scripts // {} | to_entries | sort_by(.key)[]
+	| "script \(.key):", (.value | split("%25") | join("%") | split("\n")[] | "\t" + .)' <<<"$M"
