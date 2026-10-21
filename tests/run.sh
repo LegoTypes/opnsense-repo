@@ -1406,6 +1406,7 @@ vsrc() {
 	printf 'shadowed\n' >"$vs/etc/alpha.conf.shadow"
 	printf '%s\n' 'url: %%PLUGIN_WWW%%' >"$vs/etc/pkg/repos/Alpha.conf.shadow.in"
 	printf '.Dd October 1, 2026\n.Nm alpha\n' >"$vs/man/man8/alpha.8"
+	printf 'Alpha\n' >"$vp/net/alpha/pkg-descr"
 }
 vver() { # vver [<jq filter>]: the version file Templates/version renders for net/alpha
 	jq -n --arg h "$vhash" '{product_abi: "26.7", product_arch: "amd64", product_conflicts: "os-alpha-devel",
@@ -1445,7 +1446,9 @@ vpkg() {
 			'.[$p] = {sum: $s, uname: "root", gname: "wheel", perm: $m, mtime: 1}' <<<"$files")
 	done < <(cd "$vp/stage" && find usr -type f | sort)
 	m=$(jq -c --argjson f "$files" --slurpfile v "$vu/opnsense/version/alpha" \
-		'.files = $f | .annotations = ($v[0] + {FreeBSD_version: "1500068"})' <<<"$vbase" | jq -c "${@:-.}")
+		--argjson flat "$(cd "$vp/stage" && find usr -type f -exec cat {} + | wc -c | tr -d ' ')" \
+		'.files = $f | .flatsize = $flat | .annotations = ($v[0] + {FreeBSD_version: "1500068"})' <<<"$vbase" |
+		jq -c "${@:-.}")
 	printf '%s' "$m" >"$d/+MANIFEST"
 	jq -c "del(.files, .scripts) | ${VPKG_COMPACT:-.}" <<<"$m" >"$d/+COMPACT_MANIFEST"
 	if tar --version 2>/dev/null | grep -q bsdtar; then
@@ -1657,7 +1660,7 @@ vreset
 vmk $'PLUGIN_NAME=\talpha' $'PLUGIN_VERSION=\t1.0' $'PLUGIN_COMMENT=\tAlpha'
 vver '.product_email = "N/A" | .product_website = "https://opnsense.org/"' >"$vu/opnsense/version/alpha"
 printf 'url: https://opnsense.org/\n' >"$vu/etc/pkg/repos/Alpha.conf.sample"
-vpkg
+vpkg '.maintainer = "N/A" | .www = "https://opnsense.org/"'
 vpass "payload: plugins.mk's defaults for PLUGIN_MAINTAINER, PLUGIN_WWW and PLUGIN_TIER"
 vreset
 vmk "${vdef[@]}" $'PLUGIN_TIER=\t2' $'PLUGIN_REVISION=\t1'
@@ -1761,6 +1764,152 @@ vfail "payload: a /usr/local/.. alias of a packaged file" "archive member /usr/l
 vreset
 vrepack
 vpass "payload: the same package written by bsdtar as pax"
+vreset
+# a +MANIFEST key pkg reads that plugins.mk never writes, and modes differing only in group or other bits
+vreset
+vpkg '.directories = {"/usr/local/opnsense/evil/": "y"}'
+vfail "payload: a directories key" "+MANIFEST key directories is not expected"
+vreset
+chmod 664 "$vu/opnsense/mvc/app/views/Alpha/index.volt"
+vpkg
+vfail "payload: a group-writable file in the archive" "$volt: mode 0664 in the archive, expected 0644"
+vpkg --arg p "$volt" '.files[$p].perm = "0664"'
+vfail "payload: a group-writable mode in +MANIFEST" "$volt: mode 0664 in +MANIFEST, expected 0644"
+vreset
+chmod 750 "$vu/opnsense/scripts/Alpha/run.py"
+vpkg --arg p "$runpy" '.files[$p].perm = "0755"'
+vfail "payload: an executable others cannot run, in the archive" "$runpy: mode 0750 in the archive, expected 0755"
+vpkg --arg p "$runpy" '.files[$p].perm = "0750"'
+vfail "payload: an executable others cannot run, in +MANIFEST" "$runpy: mode 0750 in +MANIFEST, expected 0755"
+
+# the source's mode is read with stat (its owner execute bit, as git records it), never with test -x,
+# which as root is true for any execute bit: a stat that says 644 makes run.py a plain file
+vreset
+mkdir -p "$T/statshim"
+printf '%s\n' '#!/bin/sh' 'echo 644' >"$T/statshim/stat"
+chmod 755 "$T/statshim/stat"
+expect_eq "payload: the source mode comes from stat" \
+	"$(PATH="$T/statshim:$PATH" vrun 2>&1 >/dev/null)" "verify-payload.sh: $runpy: mode 0755 in +MANIFEST, expected 0644"
+chmod 645 "$vs/opnsense/mvc/app/views/Alpha/index.volt"
+vpass "payload: a source file only others may execute is a plain file (git records the owner's bit)"
+
+# every other value plugins.mk's manifest target and pkg create write, derived from the Makefile, pkg-descr,
+# the plugin's directory, the ABI and the packaged files (plugins.mk:125-150, libpkg pkg_manifest.c)
+vreset
+vpkg '.origin = "opnsense/os-beta"'
+vfail "payload: another origin" "+MANIFEST origin is opnsense/os-beta, expected opnsense/os-alpha"
+vpkg '.comment = "Beta"'
+vfail "payload: another comment" "+MANIFEST comment is Beta, expected Alpha"
+vpkg '.maintainer = "other@example.org"'
+vfail "payload: another maintainer" "+MANIFEST maintainer is other@example.org, expected maintainer@example.org"
+vpkg '.www = "https://example.org/beta/"'
+vfail "payload: another www" "+MANIFEST www is https://example.org/beta/, expected https://example.org/alpha/"
+vpkg '.categories = ["sysutils"]'
+vfail "payload: another category" '+MANIFEST categories is ["sysutils"], expected ["net"]'
+vpkg '.categories = ["net", "sysutils"]'
+vfail "payload: a second category" '+MANIFEST categories is ["net","sysutils"], expected ["net"]'
+vpkg '.prefix = "/usr"'
+vfail "payload: another prefix" "+MANIFEST prefix is /usr, expected /usr/local"
+vpkg '.licenselogic = "or"'
+vfail "payload: another license logic" "+MANIFEST licenselogic is or, expected single"
+vpkg '.licenses = ["BSD2CLAUSE", "GPLv2"]'
+vfail "payload: another license" '+MANIFEST licenses is ["BSD2CLAUSE","GPLv2"], expected ["BSD2CLAUSE"]'
+vpkg '.arch = "freebsd:15:amd64"'
+vfail "payload: another legacy arch" "+MANIFEST arch is freebsd:15:amd64, expected freebsd:15:x86:64"
+vpkg '.flatsize = 1'
+vfail "payload: another flatsize" "+MANIFEST flatsize is 1, expected $(cd "$vp/stage" && find usr -type f -exec cat {} + | wc -c | tr -d ' ')"
+vpkg '.flatsize = "x"'
+vfail "payload: a flatsize that is not a number" "+MANIFEST flatsize is none, expected $(cd "$vp/stage" && find usr -type f -exec cat {} + | wc -c | tr -d ' ')"
+vpkg 'del(.comment)'
+vfail "payload: no comment" "+MANIFEST comment is none, expected Alpha"
+vpkg '.comment = ["Alpha"]'
+vfail "payload: a comment that is not a string" "+MANIFEST comment is none, expected Alpha"
+vmk "${vdef[@]}" $'PLUGIN_LICENSE=\tISCL'
+vpkg '.licenses = ["ISCL"]'
+vpass "payload: PLUGIN_LICENSE from the Makefile"
+vmk "${vdef[@]}" $'PLUGIN_LICENSE=\tBSD2CLAUSE GPLv2'
+vfail "payload: a PLUGIN_LICENSE of two words" "Makefile: PLUGIN_LICENSE is not one plain word"
+vreset
+mkdir -p "$vp/sysutils"
+mv "$vp/net/alpha" "$vp/sysutils/alpha"
+expect_eq "payload: the category is the plugin directory's parent, as plugins.mk takes it" \
+	"$(bash "$root/scripts/verify-payload.sh" "$vp/alpha.pkg" "$vp/sysutils/alpha" os-alpha 1.0 FreeBSD:15:amd64 26.7 "$commit" 2>&1 >/dev/null)" \
+	'verify-payload.sh: +MANIFEST categories is ["net"], expected ["sysutils"]'
+vreset
+# pkg-descr: trimmed of blanks at both ends (UCL_STRING_TRIM), compared as pkg reads +MANIFEST's desc
+# (url-decoded, STRING_FLAG_URLDECODE)
+printf '\n  Alpha does 100%% of alpha.\n\nWWW: https://example.org/alpha/\n\n\n' >"$vp/net/alpha/pkg-descr"
+vpkg '.desc = "Alpha does 100%25 of alpha.\n\nWWW: https://example.org/alpha/"'
+vpass "payload: desc is pkg-descr trimmed, % encoded as pkg create writes it"
+vpkg '.desc = "%41lpha does 100% of alpha.\n\nWWW: https://example.org/alpha/"'
+vpass "payload: desc as pkg decodes it (%41 is A, a lone % stays)"
+vpkg '.desc = "Alpha does 100%25 of alpha.\n\nWWW: https://example.org/alpha/\n"'
+vfail "payload: desc with a blank pkg create would have trimmed" "+MANIFEST desc, as pkg decodes it, is not pkg-descr"
+vpkg '.desc = "Alpha does 100%25 of beta.\n\nWWW: https://example.org/alpha/"'
+vfail "payload: desc other than pkg-descr" "+MANIFEST desc, as pkg decodes it, is not pkg-descr"
+vpkg '.desc = "Alpha does 100%25 of %62eta.\n\nWWW: https://example.org/alpha/"'
+vfail "payload: desc that decodes to other text" "+MANIFEST desc, as pkg decodes it, is not pkg-descr"
+vpkg '.desc = "Alpha does 100%25 of alpha.%0a%0aWWW: https://example.org/alpha/%c3%a9"'
+vfail "payload: desc that decodes to bytes beyond ASCII" "+MANIFEST desc, as pkg decodes it, is not pkg-descr"
+vpkg 'del(.desc)'
+vfail "payload: no desc" "+MANIFEST desc, as pkg decodes it, is not pkg-descr"
+# compared raw, a pkg-descr holding %41 would match a desc pkg shows as A
+printf 'Alpha code %%41\n' >"$vp/net/alpha/pkg-descr"
+vpkg '.desc = "Alpha code %41"'
+vfail "payload: desc equal to pkg-descr only before pkg decodes it" "+MANIFEST desc, as pkg decodes it, is not pkg-descr"
+vpkg '.desc = "Alpha code %2541"'
+vpass "payload: desc that pkg decodes to pkg-descr's %41"
+printf 'Alpha \303\251\n' >"$vp/net/alpha/pkg-descr"
+vfail "payload: a pkg-descr beyond printable ASCII" "pkg-descr: not printable ASCII text, tab and newline, which is not supported"
+printf 'Alpha\r\n' >"$vp/net/alpha/pkg-descr"
+vfail "payload: a pkg-descr with CR" "pkg-descr: not printable ASCII text, tab and newline, which is not supported"
+rm "$vp/net/alpha/pkg-descr"
+vfail "payload: no pkg-descr" "$vp/net/alpha: no pkg-descr"
+ln -s ../../../etc/hosts "$vp/net/alpha/pkg-descr"
+vfail "payload: a pkg-descr that is a symbolic link" "$vp/net/alpha: no pkg-descr"
+vreset
+# dependency entries and file entries: exactly the keys pkg create writes (pkg reads their keys in any case)
+vmk "${vdef[@]}" $'PLUGIN_DEPENDS=\tphp85-curl'
+vpkg '.deps = {"php85-curl": {"origin": "ftp/php85-curl", "version": "8.5.0", "ORIGIN": "x/evil"}}'
+vfail "payload: a dependency with a key pkg create does not write" "+MANIFEST dependencies are not entries of exactly an origin and a version"
+vpkg '.deps = {"php85-curl": {"origin": "ftp/php85-curl", "version": 8}}'
+vfail "payload: a dependency version that is not a string" "+MANIFEST dependencies are not entries of exactly an origin and a version"
+vreset
+vpkg --arg p "$volt" '.files[$p].fflags = "schg"'
+vfail "payload: file flags in +MANIFEST" "+MANIFEST file $volt is not exactly gname, mtime, perm, sum and uname"
+vpkg --arg p "$runpy" '.files[$p].PERM = "4755"'
+vfail "payload: a second mode under another case" "+MANIFEST file $runpy is not exactly gname, mtime, perm, sum and uname"
+vpkg --arg p "$volt" '.files[$p].symlink_target = "/etc/hosts"'
+vfail "payload: a symlink target in +MANIFEST" "+MANIFEST file $volt is not exactly gname, mtime, perm, sum and uname"
+vpkg --arg p "$volt" 'del(.files[$p].mtime)'
+vfail "payload: a file entry without its mtime" "+MANIFEST file $volt is not exactly gname, mtime, perm, sum and uname"
+vpkg --arg p "$volt" '.files[$p].mtime = "1"'
+vfail "payload: an mtime that is not a number" "+MANIFEST file $volt is not exactly gname, mtime, perm, sum and uname"
+vpkg --arg p "$volt" '.files[$p].perm = 420'
+vfail "payload: a mode that is not a string" "+MANIFEST file $volt is not exactly gname, mtime, perm, sum and uname"
+# annotations.FreeBSD_version: the build host's, all digits, of the ABI's FreeBSD major
+vpkg '.annotations.FreeBSD_version = "1501000"'
+vpass "payload: another FreeBSD 15 minor"
+vpkg '.annotations.FreeBSD_version = "15x1000"'
+vfail "payload: a FreeBSD_version that is not all digits" '+MANIFEST annotation FreeBSD_version is "15x1000", not all digits'
+vpkg '.annotations.FreeBSD_version = "1501000\nexit 0"'
+vfail "payload: a FreeBSD_version with a line of its own" '+MANIFEST annotation FreeBSD_version is "1501000\nexit 0", not all digits'
+vpkg '.annotations.FreeBSD_version = "1600010"'
+vfail "payload: a FreeBSD_version of another major than the ABI's" "+MANIFEST annotation FreeBSD_version is \"1600010\", not FreeBSD 15's"
+vpkg 'del(.annotations.FreeBSD_version)'
+vfail "payload: no FreeBSD_version" "+MANIFEST annotation FreeBSD_version is null, not all digits"
+vpkg '.annotations.FreeBSD_version = 1500068'
+vfail "payload: a FreeBSD_version that is not a string" "+MANIFEST annotation FreeBSD_version is 1500068, not all digits"
+vreset
+# the legacy arch for other ABIs, as libpkg's pkg_arch_to_legacy writes it
+for pair in aarch64:aarch64:64 armv7:armv7:32:el:eabi:hardfp riscv64:riscv:64:hf powerpc64le:powerpc:64:el; do
+	a=${pair%%:*}
+	vver ".product_arch = \"$a\"" >"$vu/opnsense/version/alpha"
+	vpkg --arg a "FreeBSD:15:$a" --arg l "freebsd:15:${pair#*:}" '.abi = $a | .arch = $l'
+	expect_eq "payload: the legacy arch of FreeBSD:15:$a" \
+		"$(bash "$root/scripts/verify-payload.sh" "$vp/alpha.pkg" "$vp/net/alpha" os-alpha 1.0 "FreeBSD:15:$a" 26.7 "$commit" 2>&1 | head -1)" \
+		"payload: OK (8 files)"
+done
 vreset
 expect_fail "payload: a commit that is not 40 hex digits" bash "$root/scripts/verify-payload.sh" "$vp/alpha.pkg" "$vp/net/alpha" os-alpha 1.0 FreeBSD:15:amd64 26.7 "$vhash"
 expect_fail "payload: usage" bash "$root/scripts/verify-payload.sh" "$vp/alpha.pkg"

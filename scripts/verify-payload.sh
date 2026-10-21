@@ -21,17 +21,29 @@
 # 1. +MANIFEST, +COMPACT_MANIFEST: UTF-8 JSON with no key repeated (jq keeps the
 #    last, pkg takes them all); only the keys pkg create writes for a plugin; the
 #    compact one is +MANIFEST without files and scripts; name, version, abi and
-#    annotation product_abi as given; dependency names equal PLUGIN_DEPENDS; scripts
-#    only under pkg's script names, printable ASCII, tab and newline, no %-escape
-#    but %25 (pkg url-decodes scripts).
+#    annotation product_abi as given; every other value plugins.mk's manifest target
+#    (plugins.mk:125-150) and pkg create write, derived: origin opnsense/<name>,
+#    comment PLUGIN_COMMENT, maintainer and www as in the version file, categories the
+#    plugin directory's parent (.CURDIR's second last word), prefix /usr/local,
+#    licenselogic single, licenses PLUGIN_LICENSE (BSD2CLAUSE), arch the ABI's legacy
+#    form (libpkg pkg_arch_to_legacy), desc pkg-descr trimmed of blanks at both ends
+#    (UCL_STRING_TRIM) and compared as pkg reads it, url-decoded (STRING_FLAG_URLDECODE);
+#    dependency names equal PLUGIN_DEPENDS, each entry exactly an origin and a version;
+#    scripts only under pkg's script names, printable ASCII, tab and newline, no
+#    %-escape but %25 (pkg url-decodes scripts). Not derivable, so not compared: a
+#    dependency's origin and version (what the build VM had installed) and each file's
+#    mtime; the scripts are shown to the approver.
 # 2. The version file: no key repeated, exactly the derived ten values; the
-#    annotations repeat it.
-# 3. The files: +MANIFEST's map one to one onto src/, and the archive holds exactly
-#    those and the two manifests.
+#    annotations repeat it, and add FreeBSD_version: all digits, of the ABI's major.
+# 3. The files: +MANIFEST's map one to one onto src/, each entry exactly the keys
+#    pkg create writes (pkg reads them in any case, so no other may stand beside
+#    them), and the archive holds exactly those and the two manifests.
 # 4. Each file: mode and owner (root:wheel) in +MANIFEST and in the archive, which
-#    is what pkg installs, and no file flags; the +MANIFEST sum (1$ sha256 or 2$
-#    BLAKE2b in pkg's base32) matches the content; the content equals the source
-#    after substitution (.in) and gunzip (man/).
+#    is what pkg installs, and no file flags; the mode 0755 when the source's owner
+#    execute bit is set (as git records it; read with stat), else 0644; the +MANIFEST
+#    sum (1$ sha256 or 2$ BLAKE2b in pkg's base32) matches the content; the content
+#    equals the source after substitution (.in) and gunzip (man/); flatsize is the
+#    packaged files' size.
 # On success prints "payload: OK (<n> files)" (<n> counts the version file) and then
 # each install script as pkg will run it (url-decoded), its name on a line
 # ("script post-install:") and its lines indented by a tab; on the first problem
@@ -39,9 +51,11 @@
 # Not modelled, so refused: contrib/, Makefile variables other than those above
 # and PLUGIN_COMMENT, PLUGIN_DEPENDS and PLUGIN_LICENSE, values holding $, `, " or
 # \ (make or sh would expand them) or &, = or %% (sed would not copy them
-# literally), a man page with .shadow, file names outside [A-Za-z0-9._+,@=~-], and
-# a .in file that is not UTF-8. Needs bash 4, jq, bsdtar (libarchive; on Ubuntu
-# the libarchive-tools package) with zstd, sha256sum, openssl (BLAKE2b), gzip, cmp.
+# literally), a PLUGIN_LICENSE of more than one word, a man page with .shadow, file
+# names outside [A-Za-z0-9._+,@=~-], a .in file that is not UTF-8, and a pkg-descr
+# that is missing, a symbolic link or other than printable ASCII, tab and newline.
+# Needs bash 4, jq, bsdtar (libarchive; on Ubuntu the libarchive-tools package) with
+# zstd, sha256sum, openssl (BLAKE2b), gzip, cmp, stat (GNU or BSD).
 set -euo pipefail
 
 die() {
@@ -99,7 +113,7 @@ done <"$work/makefile"
 for v in PLUGIN_NAME PLUGIN_VERSION PLUGIN_COMMENT; do
 	[[ -n ${mk[$v]:-} ]] || die "Makefile: $v is not set"
 done
-for v in PLUGIN_NAME PLUGIN_VERSION PLUGIN_REVISION PLUGIN_TIER; do
+for v in PLUGIN_NAME PLUGIN_VERSION PLUGIN_REVISION PLUGIN_TIER PLUGIN_LICENSE; do
 	[[ -z ${mk[$v]:-} || ${mk[$v]} =~ ^[A-Za-z0-9._+-]+$ ]] || die "Makefile: $v is not one plain word"
 done
 for v in PLUGIN_MAINTAINER PLUGIN_WWW PLUGIN_CONFLICTS; do
@@ -107,6 +121,35 @@ for v in PLUGIN_MAINTAINER PLUGIN_WWW PLUGIN_CONFLICTS; do
 	*'&'* | *'='* | *'%%'*) die "Makefile: $v holds &, = or %%, which sed would not copy literally" ;;
 	esac
 done
+# pkg-descr, which plugins.mk's description target writes as +DESC (PLUGIN_DESC is not the
+# Makefile's to change): printable ASCII, tab and newline, so jq reads it byte for byte
+descr=$dir/pkg-descr
+[[ -f $descr && ! -L $descr ]] || die "$dir: no pkg-descr"
+if LC_ALL=C grep -q $'[^\t -~]' "$descr"; then
+	die "pkg-descr: not printable ASCII text, tab and newline, which is not supported"
+fi
+# trimmed as UCL_STRING_TRIM trims (libucl: space, tab, newline, VT, FF, CR)
+want_desc=$(jq -Rs 'sub("\\A[ \t\n\u000b\f\r]+"; "") | sub("[ \t\n\u000b\f\r]+\\z"; "")' "$descr")
+# the category: the second last word of the directory make runs in (.CURDIR), the
+# plugin's directory resolved as make resolves it
+real=$(CDPATH='' cd -- "$dir" && pwd -P) || die "cannot resolve $dir"
+category=${real%/*}
+category=${category##*/}
+[[ $category =~ ^[A-Za-z0-9._+-]+$ ]] || die "$dir: the category ${category:-(none)} is not one plain word"
+# the legacy arch pkg create writes beside the ABI (libpkg pkg_abi.c pkg_arch_to_legacy and
+# machine_arch_translation at pkg 2.8.4): the OS in lower case, the major, then the machine
+# as its ELF type, or as it is when the table has none
+declare -A elf=([i386]=x86:32 [amd64]=x86:64 [powerpc]=powerpc:32:eb [powerpc64]=powerpc:64:eb
+	[powerpc64le]=powerpc:64:el [sparc64]=sparc64:64 [ia64]=ia64:64 [armv6]=armv6:32:el:eabi:hardfp
+	[armv7]=armv7:32:el:eabi:hardfp [aarch64]=aarch64:64 [aarch64c]=aarch64:64:cheri
+	[aarch64cb]=aarch64:64:cheri:benchmark [mipsel]=mips:32:el:o32 [mipsn32el]=mips:32:el:n32
+	[mips]=mips:32:eb:o32 [mipsn32]=mips:32:eb:n32 [mips64el]=mips:64:el:n64 [mips64]=mips:64:eb:n64
+	[riscv32]=riscv:32:hf [riscv32sf]=riscv:32:sf [riscv64]=riscv:64:hf [riscv64c]=riscv:64:cheri:hf
+	[riscv64sf]=riscv:64:sf)
+machine=${abi##*:}
+major=${abi#FreeBSD:}
+major=${major%%:*}
+legacy=freebsd:$major:${elf[$machine]:-$machine}
 pname=${mk[PLUGIN_NAME]}
 pkgversion=${mk[PLUGIN_VERSION]}
 [[ ${mk[PLUGIN_REVISION]:-0} == 0 ]] || pkgversion+=_${mk[PLUGIN_REVISION]}
@@ -149,6 +192,9 @@ for i in "${!listed[@]}"; do
 	k=${m#/}
 	[[ -z ${member[$k]:-} ]] || die "archive member $m appears twice"
 	member[$k]=$m
+	# a hard link is told from a regular file here or nowhere: libarchive's mtree output
+	# (step 4) writes a hard link as type=file, as mtree has no hard link type (its link
+	# keyword is a symbolic link's target), while bsdtar -tv marks it "h"
 	case ${verbose[i]:0:1} in
 	-) ;;
 	h) die "archive member $m is a hard link, not a regular file" ;;
@@ -185,6 +231,39 @@ is "+MANIFEST name" "$(jq -r '.name | strings' <<<"$M")" "$name"
 is "+MANIFEST version" "$(jq -r '.version | strings' <<<"$M")" "$version"
 is "+MANIFEST abi" "$(jq -r '.abi | strings' <<<"$M")" "$abi"
 is "+MANIFEST product_abi" "$(jq -r '.annotations.product_abi? | strings' <<<"$M")" "$series"
+# field <key> <want>: +MANIFEST's string <key> is <want>; list <key> <want JSON>: its value is <want>
+field() {
+	local v
+	v=$(jq -r --arg k "$1" '.[$k] | strings' <<<"$M")
+	[[ $v == "$2" ]] || die "+MANIFEST $1 is ${v:-none}, expected $2"
+}
+list() {
+	local v
+	v=$(jq -c --arg k "$1" '.[$k]' <<<"$M")
+	[[ $v == "$2" ]] || die "+MANIFEST $1 is $v, expected $2"
+}
+field origin "opnsense/$name"
+field comment "${mk[PLUGIN_COMMENT]}"
+field maintainer "${mk[PLUGIN_MAINTAINER]:-N/A}"
+field www "${mk[PLUGIN_WWW]:-https://opnsense.org/}"
+list categories "$(jq -cn --arg c "$category" '[$c]')"
+field prefix /usr/local
+field licenselogic single
+list licenses "$(jq -cn --arg l "${mk[PLUGIN_LICENSE]:-BSD2CLAUSE}" '[$l]')"
+field arch "$legacy"
+# desc as pkg reads it: libpkg's url_decode, a % and two hex digits one byte (pkg create
+# writes % and every byte beyond ASCII so); pkg-descr is ASCII, so a byte decoded beyond it
+# never compares equal
+jq -e --argjson d "$want_desc" '
+	def hexv: if . >= 97 then . - 87 elif . >= 65 then . - 55 else . - 48 end;
+	def isx: (. >= 48 and . <= 57) or (. >= 65 and . <= 70) or (. >= 97 and . <= 102);
+	(.desc | strings | explode) as $c | ($c | length) as $n
+	| [foreach range(0; $n) as $i ({s: 0, o: null};
+		if .s > 0 then {s: (.s - 1), o: null}
+		elif $c[$i] == 37 and $i + 2 < $n and ($c[$i + 1] | isx) and ($c[$i + 2] | isx)
+		then {s: 2, o: (($c[$i + 1] | hexv) * 16 + ($c[$i + 2] | hexv))}
+		else {s: 0, o: $c[$i]} end;
+		.o | values)] | implode == $d' <<<"$M" >/dev/null || die "+MANIFEST desc, as pkg decodes it, is not pkg-descr"
 jq -e '.scripts // {} | type == "object" and all(.[]; type == "string")' <<<"$M" >/dev/null ||
 	die "+MANIFEST scripts are not an object of strings"
 # pkg_manifest.c script_type_str: the names pkg runs; pkg url-decodes each script, and pkg create
@@ -197,6 +276,9 @@ v=$(jq -r '.scripts // {} | to_entries
 [[ -z $v ]] || die "script $v holds characters other than printable ASCII, tab and newline"
 v=$(jq -r '.scripts // {} | to_entries | map(select(.value | test("%(?!25)")))[0].key // empty' <<<"$M")
 [[ -z $v ]] || die "script $v holds a %-escape other than %25, which pkg would decode"
+# pkg reads a dependency's origin and version keys in any case: exactly those two, as strings
+jq -e '.deps // {} | type == "object" and all(.[]; type == "object" and keys == ["origin", "version"] and all(.[]; type == "string"))' \
+	<<<"$M" >/dev/null || die "+MANIFEST dependencies are not entries of exactly an origin and a version"
 have_deps=$(jq -r '.deps // {} | keys | join(" ")' <<<"$M")
 [[ $have_deps == "$want_deps" ]] ||
 	die "dependencies (${have_deps:-none}) differ from PLUGIN_DEPENDS (${want_deps:-none})"
@@ -214,6 +296,11 @@ for k in $(jq -r 'keys[]' <<<"$want"); do
 done
 jq -e --argjson v "$V" '.annotations | type == "object" and del(.FreeBSD_version) == $v' <<<"$M" >/dev/null ||
 	die "+MANIFEST annotations differ from the version file"
+# FreeBSD_version: pkg create's "%d" of the build host's osversion, whose major is the ABI's
+fv=$(jq -c '.annotations.FreeBSD_version' <<<"$M")
+[[ $fv =~ ^\"[0-9]+\"$ ]] || die "+MANIFEST annotation FreeBSD_version is $fv, not all digits"
+fv=${fv//\"/}
+[[ ${#fv} -gt 5 && ${fv:0:${#fv}-5} == "$major" ]] || die "+MANIFEST annotation FreeBSD_version is \"$fv\", not FreeBSD $major's"
 # the tokens in Mk/defaults.mk REPLACEMENTS order (sed applies them in turn), with the derived values;
 # PLUGIN_VARIANT is empty without variants
 map=$(jq -c '[["PLUGIN_ABI", .product_abi], ["PLUGIN_ARCH", .product_arch], ["PLUGIN_CONFLICTS", .product_conflicts],
@@ -246,6 +333,11 @@ done <"$work/src"
 
 jq -e '.files | all(.[]; type == "object") and all(keys[]; test("^/[A-Za-z0-9._+,@=~/-]+$"))' <<<"$M" >/dev/null ||
 	die "+MANIFEST files are not entries with plain names"
+# pkg reads a file entry's keys in any case and also takes fflags and symlink_target: exactly
+# the five pkg create writes, mtime a number and the rest strings
+v=$(jq -r '.files | to_entries | map(select(.value | (keys != ["gname", "mtime", "perm", "sum", "uname"])
+	or ((.mtime | type) != "number") or ([.gname, .perm, .sum, .uname] | any(type != "string"))))[0].key // empty' <<<"$M")
+[[ -z $v ]] || die "+MANIFEST file $v is not exactly gname, mtime, perm, sum and uname"
 mapfile -t files < <(jq -r '.files | keys[]' <<<"$M")
 declare -A listed_in_manifest=()
 for p in "${files[@]}"; do
@@ -301,14 +393,19 @@ blake2() { # pkg's 2$ sum: BLAKE2b-512, base32 taking the bits least significant
 	((n == 0)) || out+=${b32:acc:1}
 	echo "$out"
 }
+# mode <file>: its permission bits in octal, from GNU stat or else BSD stat
+mode() { stat -c %a -- "$1" 2>/dev/null || stat -f %Lp -- "$1"; }
+flat=0
 for p in "${files[@]}"; do
 	k=${p#/}
 	if [[ $p == "$vfile" || -n ${gz[$p]:-} ]]; then
 		perm=0644
-	elif [[ -x $dir/src/${from[$p]} ]]; then
-		perm=0755
 	else
-		perm=0644
+		# git records a file executable by its owner execute bit, and the build checks the
+		# source out with umask 022: 0755 or 0644 (test -x would ask whether this user may run it)
+		m=$(mode "$dir/src/${from[$p]}") || die "cannot read the mode of src/${from[$p]}"
+		[[ $m =~ ^[0-7]{1,4}$ ]] || die "src/${from[$p]}: stat gives the mode $m"
+		if ((8#$m & 8#100)); then perm=0755; else perm=0644; fi
 	fi
 	v=$(jq -r --arg p "$p" '.files[$p].perm // empty' <<<"$M")
 	[[ $v == "$perm" ]] || die "$p: mode ${v:-none} in +MANIFEST, expected $perm"
@@ -321,6 +418,7 @@ for p in "${files[@]}"; do
 	v=$(attr "$k" uname):$(attr "$k" gname)
 	[[ $v == root:wheel ]] || die "$p: owner $v in the archive, expected root:wheel"
 	extract "$k" "$work/packaged"
+	flat=$((flat + $(wc -c <"$work/packaged")))
 	v=$(jq -r --arg p "$p" '.files[$p].sum // ""' <<<"$M")
 	case $v in
 	1\$*) got=$(sha256sum <"$work/packaged" | cut -d' ' -f1) ;;
@@ -342,6 +440,10 @@ for p in "${files[@]}"; do
 	fi
 	cmp -s "$work/packaged" "$src" || die "$p differs from src/${from[$p]}"
 done
+
+# flatsize: pkg create's sum of the packaged files' sizes (no hard links: each counts once)
+v=$(jq -r '.flatsize | numbers' <<<"$M")
+[[ $v == "$flat" ]] || die "+MANIFEST flatsize is ${v:-none}, expected $flat"
 
 echo "payload: OK (${#files[@]} files)"
 jq -r '.scripts // {} | to_entries | sort_by(.key)[]
