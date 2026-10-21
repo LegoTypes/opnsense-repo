@@ -11,10 +11,11 @@ declare(strict_types=1);
  * Read-only: do the LegoTypes packages fit this firewall? Compares the running
  * series and package ABI with the repository config and every installed LegoTypes
  * package, and lists available updates and hand-installed packages. Then reads the
- * repository's signed catalogue stamp: when the catalogue was published, a mismatch if
- * the stamp is missing (HTTP 404) or does not verify, information only if the site
- * cannot be reached. Prints its findings; exits 1 on a mismatch (Monit alerts when
- * that starts and when it ends), 0 otherwise.
+ * repository's signed catalogue stamp: when the catalogue was published; a mismatch if
+ * the site answers without a valid stamp (404, any answer but 200 and 5xx, a forged or
+ * malformed stamp); information only if the site cannot be reached or has an outage.
+ * Prints its findings; exits 1 on a mismatch (Monit alerts when that starts and when it
+ * ends), 0 otherwise.
  */
 
 require_once __DIR__ . '/lib.php';
@@ -38,20 +39,23 @@ function lt_rows(string $cmd, int $fields): array
 }
 
 /**
- * The stamp's three files from beside the catalogue: [name => contents, null for one
- * the site answered 404 for; null] or [[]; why the site could not be reached (curl's
- * error, or an HTTP status other than 200 and 404)]. Each fetch connects within 3 s and
- * ends within 6 s, so the check never holds Monit up; redirects are not followed.
+ * Fetch the stamp's three files from beside the catalogue, recording only what happened:
+ * [name => [status, body] for each file the site answered; null, or the transport failure
+ * that stopped the fetch (the file, curl's error number and message)]. Classifying it is
+ * legotypes_stamp_findings()'s. Each fetch connects within 3 s and ends within 6 s, so the
+ * check never holds Monit up; redirects are not followed; a body over
+ * LEGOTYPES_STAMP_MAX_BYTES stops the transfer (CURLE_FILESIZE_EXCEEDED: libcurl 8.4 and
+ * later enforce CURLOPT_MAXFILESIZE with or without a Content-Length; 26.7 ships 8.22).
  *
- * @return array{0: array<string, ?string>, 1: ?string}
+ * @return array{0: array<string, array{status: int, body: string}>, 1: ?array{file: string, errno: int, error: string}}
  */
 function lt_fetch_stamp(string $url): array
 {
+    $files = [];
     $ch = curl_init();
     if ($ch === false) {
-        return [[], 'curl could not start'];
+        return [$files, ['file' => 'stamp', 'errno' => CURLE_FAILED_INIT, 'error' => 'curl could not start']];
     }
-    $files = [];
     foreach (['stamp', 'stamp.sig', 'stamp.pub'] as $name) {
         curl_setopt_array($ch, [
             CURLOPT_URL => "{$url}/{$name}",
@@ -59,32 +63,30 @@ function lt_fetch_stamp(string $url): array
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_CONNECTTIMEOUT => 3,
             CURLOPT_TIMEOUT => 6,
-            CURLOPT_MAXFILESIZE => 65536,
+            CURLOPT_MAXFILESIZE => LEGOTYPES_STAMP_MAX_BYTES,
         ]);
         $body = curl_exec($ch);
         if (!is_string($body)) {
+            $errno = curl_errno($ch);
             $error = curl_error($ch);
-            return [[], $error !== '' ? $error : (string)curl_strerror(curl_errno($ch))];
+            $error = $error !== '' ? $error : (string)curl_strerror($errno);
+            return [$files, ['file' => $name, 'errno' => $errno, 'error' => $error]];
         }
-        $status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-        if ($status === 404) {
-            $files[$name] = null;
-        } elseif ($status === 200) {
-            $files[$name] = $body;
-        } else {
-            return [[], "HTTP {$status} for {$name}"];
-        }
+        $files[$name] = ['status' => (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE), 'body' => $body];
     }
     return [$files, null];
 }
 
-/** @return list<string> the contents of each file in a fingerprint directory */
+/**
+ * @return list<string> the contents of every file in a fingerprint directory, dotfiles
+ * too, as pkg reads it; none for a directory that is absent (revoked/ may be)
+ */
 function lt_fingerprint_files(string $dir): array
 {
     $files = [];
-    foreach (glob($dir . '/*') ?: [] as $path) {
-        if (is_file($path)) {
-            $files[] = (string)file_get_contents($path);
+    foreach ((is_dir($dir) ? scandir($dir) : false) ?: [] as $entry) {
+        if ($entry !== '.' && $entry !== '..' && is_file("{$dir}/{$entry}")) {
+            $files[] = (string)file_get_contents("{$dir}/{$entry}");
         }
     }
     return $files;
@@ -129,9 +131,8 @@ if ($confText !== null && $urlSeries !== null) {
         $fingerprints = '/usr/local/etc/pkg/fingerprints/LegoTypes';
         $trusted = legotypes_fingerprints(lt_fingerprint_files("{$fingerprints}/trusted"),
             lt_fingerprint_files("{$fingerprints}/revoked"));
-        [$files, $error] = lt_fetch_stamp($url);
-        $stamp = legotypes_stamp_findings($files['stamp'] ?? null, $files['stamp.sig'] ?? null, $files['stamp.pub'] ?? null,
-            $trusted, time(), $error, "{$abi}/{$urlSeries}");
+        [$files, $transport] = lt_fetch_stamp($url);
+        $stamp = legotypes_stamp_findings($files, $transport, $trusted, time(), "{$abi}/{$urlSeries}");
     }
     foreach ($stamp as [$level, $text]) {
         $r[$level === 'MISMATCH' ? 'mismatch' : 'info'][] = $text;

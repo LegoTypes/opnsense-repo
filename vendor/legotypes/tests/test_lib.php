@@ -81,41 +81,79 @@ $sign = function (string $content, OpenSSLAsymmetricKey $k): string {
 $at = gmmktime(17, 4, 5, 10, 18, 2026);
 $stamp = "published: 2026-10-18T17:04:05Z\nrun: 18734512345\ntree: FreeBSD:15:amd64/26.7\n";
 $sig = $sign($stamp, $key);
-$sf = fn (?string $s, ?string $g, ?string $p, array $t, int $now, ?string $err, string $tree = 'FreeBSD:15:amd64/26.7'): array =>
-    legotypes_stamp_findings($s, $g, $p, $t, $now, $err, $tree);
+$tree = 'FreeBSD:15:amd64/26.7';
+/* what the site answered for one file */
+$ok = fn (string $body): array => ['status' => 200, 'body' => $body];
+$http = fn (int $status): array => ['status' => $status, 'body' => "<html>{$status}</html>"];
+$valid = ['stamp' => $ok($stamp), 'stamp.sig' => $ok($sig), 'stamp.pub' => $ok($pub)];
+/* three files the site answered 200 for */
+$sf = fn (string $s, string $g, string $p, array $t, int $now, string $tr = 'FreeBSD:15:amd64/26.7'): array =>
+    legotypes_stamp_findings(['stamp' => $ok($s), 'stamp.sig' => $ok($g), 'stamp.pub' => $ok($p)], null, $t, $now, $tr);
+/* the valid answers with some replaced, or only the files given, and a transport failure */
+$answers = fn (array $over): array => legotypes_stamp_findings(array_replace($valid, $over), null, [$fpr], $at, $tree);
+$fetched = fn (array $files, ?array $transport): array => legotypes_stamp_findings($files, $transport, [$fpr], $at, $tree);
 $mismatch = fn (array $r): bool => count($r) === 1 && $r[0][0] === 'MISMATCH';
+$info = fn (array $r): bool => count($r) === 1 && $r[0][0] === 'INFO';
 
 check('a valid stamp is information with its age',
-    $sf($stamp, $sig, $pub, [$fpr], $at + 3 * 86400 + 3600, null) === [['INFO', 'catalogue published 2026-10-18T17:04:05Z (3 days ago)']]);
+    $sf($stamp, $sig, $pub, [$fpr], $at + 3 * 86400 + 3600) === [['INFO', 'catalogue published 2026-10-18T17:04:05Z (3 days ago)']]);
 check('a valid stamp a day old',
-    $sf($stamp, $sig, $pub, [$fpr], $at + 86400, null) === [['INFO', 'catalogue published 2026-10-18T17:04:05Z (1 day ago)']]);
+    $sf($stamp, $sig, $pub, [$fpr], $at + 86400) === [['INFO', 'catalogue published 2026-10-18T17:04:05Z (1 day ago)']]);
 check('a valid stamp published today',
-    $sf($stamp, $sig, $pub, [$fpr], $at + 60, null) === [['INFO', 'catalogue published 2026-10-18T17:04:05Z (0 days ago)']]);
+    $sf($stamp, $sig, $pub, [$fpr], $at + 60) === [['INFO', 'catalogue published 2026-10-18T17:04:05Z (0 days ago)']]);
 check('a stamp a little ahead of this clock is within the skew',
-    $sf($stamp, $sig, $pub, [$fpr], $at - 300, null) === [['INFO', 'catalogue published 2026-10-18T17:04:05Z (0 days ago)']]);
-check('a valid stamp among several trusted fingerprints', $sf($stamp, $sig, $pub, [$otherFpr, $fpr], $at, null)[0][0] === 'INFO');
-check('a stamp dated in the future beyond the skew', $mismatch($sf($stamp, $sig, $pub, [$fpr], $at - 301, null)));
+    $sf($stamp, $sig, $pub, [$fpr], $at - 300) === [['INFO', 'catalogue published 2026-10-18T17:04:05Z (0 days ago)']]);
+check('a valid stamp among several trusted fingerprints', $sf($stamp, $sig, $pub, [$otherFpr, $fpr], $at)[0][0] === 'INFO');
+check('a stamp dated beyond the skew means this clock is behind: information', $sf($stamp, $sig, $pub, [$fpr], $at - 301)
+    === [['INFO', "catalogue stamp is dated 2026-10-18T17:04:05Z, ahead of this firewall's clock (2026-10-18T16:59:04Z)"]]);
 
-check('a signature by another key', $mismatch($sf($stamp, $sign($stamp, $other), $pub, [$fpr], $at, null)));
+check('a signature by another key', $mismatch($sf($stamp, $sign($stamp, $other), $pub, [$fpr], $at)));
 check('a stamp changed after signing',
-    $mismatch($sf(str_replace('2026-10-18', '2026-10-20', $stamp), $sig, $pub, [$fpr], $at + 3 * 86400, null)));
-check('a signature that is not one', $mismatch($sf($stamp, 'not a signature', $pub, [$fpr], $at, null)));
-check('an empty signature', $mismatch($sf($stamp, '', $pub, [$fpr], $at, null)));
-$r = $sf($stamp, $sign($stamp, $other), $otherPub, [$fpr], $at, null);
+    $mismatch($sf(str_replace('2026-10-18', '2026-10-20', $stamp), $sig, $pub, [$fpr], $at + 3 * 86400)));
+check('a signature that is not one', $mismatch($sf($stamp, 'not a signature', $pub, [$fpr], $at)));
+check('an empty signature', $mismatch($sf($stamp, '', $pub, [$fpr], $at)));
+$r = $sf($stamp, $sign($stamp, $other), $otherPub, [$fpr], $at);
 check('a stamp signed and keyed by an untrusted key', $mismatch($r) && str_contains($r[0][1], 'not a trusted'));
-check('no trusted fingerprint at all', $mismatch($sf($stamp, $sig, $pub, [], $at, null)));
-check('a trusted stamp.pub that is not a key', $mismatch($sf($stamp, $sig, 'not a key', [hash('sha256', 'not a key')], $at, null)));
+check('no trusted fingerprint at all', $mismatch($sf($stamp, $sig, $pub, [], $at)));
+check('a trusted stamp.pub that is not a key', $mismatch($sf($stamp, $sig, 'not a key', [hash('sha256', 'not a key')], $at)));
 
-$r = $sf(null, $sig, $pub, [$fpr], $at, null);
-check('no stamp (HTTP 404)', $mismatch($r) && str_contains($r[0][1], 'not found: stamp)'));
-$r = $sf($stamp, null, $pub, [$fpr], $at, null);
-check('no stamp.sig (HTTP 404)', $mismatch($r) && str_contains($r[0][1], 'not found: stamp.sig)'));
-$r = $sf($stamp, $sig, null, [$fpr], $at, null);
-check('no stamp.pub (HTTP 404)', $mismatch($r) && str_contains($r[0][1], 'not found: stamp.pub)'));
-$r = $sf(null, null, null, [$fpr], $at, null);
-check('none of the three (HTTP 404)', $mismatch($r) && str_contains($r[0][1], 'not found: stamp, stamp.sig, stamp.pub)'));
+check('the valid answers', $info($answers([])));
+$r = $answers(['stamp' => $http(404)]);
+check('no stamp (HTTP 404)', $mismatch($r) && str_contains($r[0][1], '(stamp: HTTP 404)'));
+$r = $answers(['stamp.sig' => $http(404)]);
+check('no stamp.sig (HTTP 404)', $mismatch($r) && str_contains($r[0][1], '(stamp.sig: HTTP 404)'));
+$r = $answers(['stamp.pub' => $http(404)]);
+check('no stamp.pub (HTTP 404)', $mismatch($r) && str_contains($r[0][1], '(stamp.pub: HTTP 404)'));
+$r = $answers(['stamp' => $http(404), 'stamp.sig' => $http(404), 'stamp.pub' => $http(404)]);
+check('none of the three (HTTP 404)', $mismatch($r)
+    && $r[0][1] === 'the repository answers without a catalogue stamp (stamp: HTTP 404, stamp.sig: HTTP 404, stamp.pub: HTTP 404)');
+$r = $answers(['stamp' => $http(301)]);
+check('a redirect (HTTP 301) is not the stamp', $mismatch($r) && str_contains($r[0][1], 'stamp: HTTP 301'));
+$r = $answers(['stamp.sig' => $http(403)]);
+check('HTTP 403 is not the stamp', $mismatch($r) && str_contains($r[0][1], 'stamp.sig: HTTP 403'));
+$r = $answers(['stamp.pub' => $http(410)]);
+check('HTTP 410 is not the stamp', $mismatch($r) && str_contains($r[0][1], 'stamp.pub: HTTP 410'));
+check('an outage (HTTP 503) is information', $answers(['stamp.sig' => $http(503)])
+    === [['INFO', 'could not fetch the stamp (HTTP 503 for stamp.sig)']]);
+check('an outage (HTTP 500) is information', $info($answers(['stamp' => $http(500)])));
+check('a 404 beside an outage is a mismatch', $mismatch($answers(['stamp' => $http(404), 'stamp.sig' => $http(503)])));
 
-$signed = fn (string $s): array => $sf($s, $sign($s, $key), $pub, [$fpr], $at, null);
+$big = ['file' => 'stamp.pub', 'errno' => CURLE_FILESIZE_EXCEEDED, 'error' => 'Maximum file size exceeded'];
+$r = $fetched(['stamp' => $ok($stamp), 'stamp.sig' => $ok($sig)], $big);
+check('a stamp file over the cap is a mismatch', $mismatch($r) && str_contains($r[0][1], 'stamp.pub is too large'));
+check('an unreachable site is information',
+    $fetched([], ['file' => 'stamp', 'errno' => 6, 'error' => 'Could not resolve host: legotypes.github.io'])
+    === [['INFO', 'could not fetch the stamp (Could not resolve host: legotypes.github.io)']]);
+check('a refused connection is information',
+    $info($fetched([], ['file' => 'stamp', 'errno' => 7, 'error' => 'Failed to connect to 127.0.0.1 port 443'])));
+check('a fetch that timed out after the stamp came is information',
+    $info($fetched(['stamp' => $ok($stamp)], ['file' => 'stamp.sig', 'errno' => 28, 'error' => 'Connection timed out after 3001 milliseconds'])));
+check('a 404 before a fetch timed out is a mismatch',
+    $mismatch($fetched(['stamp' => $http(404)], ['file' => 'stamp.sig', 'errno' => 28, 'error' => 'Operation timed out'])));
+$r = $fetched(['stamp' => $ok($stamp), 'stamp.pub' => $ok($pub)], null);
+check('a file with no answer and no transport failure is a mismatch', $mismatch($r) && str_contains($r[0][1], 'stamp.sig: no answer'));
+
+$signed = fn (string $s): array => $sf($s, $sign($s, $key), $pub, [$fpr], $at);
 check('a stamp with no run', $mismatch($signed("published: 2026-10-18T17:04:05Z\ntree: FreeBSD:15:amd64/26.7\n")));
 check('a stamp with an extra line', $mismatch($signed($stamp . "note: hello\n")));
 check('a stamp with a blank line at the end', $mismatch($signed($stamp . "\n")));
@@ -132,19 +170,33 @@ check('a stamp with a run that is not digits',
 check('an empty stamp', $mismatch($signed('')));
 $r = $signed("published: 2026-10-18T17:04:05Z\nrun: 18734512345\ntree: FreeBSD:15:amd64/26.1\n");
 check('a stamp for another tree', $mismatch($r) && str_contains($r[0][1], 'FreeBSD:15:amd64/26.1'));
-check('a stamp for another ABI', $mismatch($sf($stamp, $sig, $pub, [$fpr], $at, null, 'FreeBSD:16:amd64/26.7')));
+check('a stamp for another ABI', $mismatch($sf($stamp, $sig, $pub, [$fpr], $at, 'FreeBSD:16:amd64/26.7')));
 
-check('an unreachable site is information',
-    $sf(null, null, null, [$fpr], $at, 'Could not resolve host: legotypes.github.io')
-    === [['INFO', 'could not fetch the stamp (Could not resolve host: legotypes.github.io)']]);
-check('a fetch that failed part way is information, whatever was fetched',
-    $sf($stamp, null, null, [$fpr], $at, 'Connection timed out after 3001 milliseconds')[0][0] === 'INFO');
-
+/* fingerprint files: trusted read as strictly as pkg trusts (anything else is not trusted), revoked read loosely */
 $t = "function: \"sha256\"\nfingerprint: \"{$fpr}\"\n";
 $o = "function: \"sha256\"\nfingerprint: \"{$otherFpr}\"\n";
 check('trusted fingerprints are read from their files', legotypes_fingerprints([$t, $o], []) === [$fpr, $otherFpr]);
 check('a revoked fingerprint is not trusted', legotypes_fingerprints([$t, $o], [$o]) === [$fpr]);
 check('a file with no fingerprint adds none', legotypes_fingerprints(["function: \"sha256\"\n", ''], []) === []);
+check('a revocation written fingerprint = "...";',
+    legotypes_fingerprints([$t, $o], ["function = \"sha256\";\nfingerprint = \"{$otherFpr}\";\n"]) === [$fpr]);
+check('a revocation written as JSON on one line',
+    legotypes_fingerprints([$t, $o], ["{\"function\": \"sha256\", \"fingerprint\": \"{$otherFpr}\"}"]) === [$fpr]);
+check('a revocation in upper case', legotypes_fingerprints([$t, $o], ['fingerprint: "' . strtoupper($otherFpr) . "\"\n"]) === [$fpr]);
+check('a revocation with no function line', legotypes_fingerprints([$t], ["fingerprint: {$fpr}\n"]) === []);
+check('trusted: keys in any case, written with =, quoted keys',
+    legotypes_fingerprints(["FUNCTION = \"SHA256\";\nFingerprint = \"{$fpr}\";\n", "\"function\": \"sha256\",\n\"fingerprint\": \"{$otherFpr}\",\n"], [])
+    === [$fpr, $otherFpr]);
+check('trusted: no function line, not trusted (as pkg)', legotypes_fingerprints(["fingerprint: \"{$fpr}\"\n"], []) === []);
+check('trusted: another function, not trusted', legotypes_fingerprints(["function: \"sha1\"\nfingerprint: \"{$fpr}\"\n"], []) === []);
+check('trusted: a commented-out fingerprint is not trusted',
+    legotypes_fingerprints(["function: \"sha256\"\n# fingerprint: \"{$fpr}\"\n"], []) === []);
+check('trusted: upper case never matches a key (pkg compares exactly)',
+    legotypes_fingerprints(['function: "sha256"' . "\nfingerprint: \"" . strtoupper($fpr) . "\"\n"], []) === []);
+$shipped = glob(__DIR__ . '/../src/etc/pkg/fingerprints/LegoTypes/trusted/*') ?: [];
+check('every shipped trusted file gives its fingerprint', $shipped !== []
+    && count(legotypes_fingerprints(array_map(fn (string $f): string => (string)file_get_contents($f), $shipped), [])) === count($shipped));
+check('trusted: the last fingerprint in a file is the one (as pkg)', legotypes_fingerprints([$t . "fingerprint: \"{$otherFpr}\"\n"], []) === [$otherFpr]);
 
 echo ($total - $fail) . "/{$total} passed\n";
 exit($fail === 0 ? 0 : 1);

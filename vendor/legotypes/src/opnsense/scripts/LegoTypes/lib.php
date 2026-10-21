@@ -62,8 +62,11 @@ function legotypes_findings(string $series, string $abi, ?string $urlSeries, arr
     return ['mismatch' => $mismatch, 'info' => $info];
 }
 
-/** Seconds a catalogue stamp may be dated ahead of this firewall's clock before that is a mismatch. */
+/** Seconds a catalogue stamp may be dated ahead of this firewall's clock and still read as published now. */
 const LEGOTYPES_STAMP_SKEW = 300;
+
+/** The largest stamp file fetched: the stamp, its signature and its key are each well under 4 KiB. */
+const LEGOTYPES_STAMP_MAX_BYTES = 65536;
 
 /**
  * The repository's tree URL from its config, with ${ABI} resolved as pkg resolves it
@@ -80,8 +83,17 @@ function legotypes_tree_url(string $conf, string $abi): ?string
 }
 
 /**
- * The fingerprints pkg trusts for the repository: every `fingerprint: "<sha256 hex>"` in
- * a trusted file that is in no revoked file.
+ * The fingerprints the repository's packages are checked against, as pkg reads them
+ * (libpkg/pkg_repo.c, pkg_repo_load_fingerprints): every file in trusted/ and revoked/,
+ * dotfiles too; a revoked fingerprint is never trusted.
+ *
+ * Trusted files are read strictly, so anything pkg might not trust is not trusted here:
+ * a line `fingerprint: "<hex>"` (key in any case, optionally quoted, `:` or `=`, an
+ * optional `;` or `,`) counts only in a file with a `function: "sha256"` line, the last
+ * one in a file wins, and it counts only as 64 lower-case hex digits (pkg compares it
+ * exactly with the lower-case sha256 of the key, so nothing else matches). Revoked files are read loosely, so anything pkg might
+ * revoke is revoked here: every run of 64 hex digits in them, in either case, whatever
+ * UCL spelling surrounds it.
  *
  * @param list<string> $trusted the contents of each file in fingerprints/LegoTypes/trusted
  * @param list<string> $revoked the contents of each file in fingerprints/LegoTypes/revoked
@@ -89,16 +101,25 @@ function legotypes_tree_url(string $conf, string $abi): ?string
  */
 function legotypes_fingerprints(array $trusted, array $revoked): array
 {
-    $read = function (array $files): array {
-        $found = [];
-        foreach ($files as $content) {
-            if (preg_match_all('/^fingerprint:\s*"([0-9a-f]{64})"\s*$/m', $content, $m) > 0) {
-                array_push($found, ...$m[1]);
-            }
+    $function = '/^[ \t]*"?function"?[ \t]*[:=][ \t]*(?:"sha256"|sha256)[ \t]*[;,]?[ \t]*\r?$/mi';
+    $fingerprint = '/^[ \t]*"?fingerprint"?[ \t]*[:=][ \t]*"([^"\r\n]*)"[ \t]*[;,]?[ \t]*\r?$/mi';
+    $found = [];
+    foreach ($trusted as $content) {
+        if (preg_match($function, $content) !== 1 || preg_match_all($fingerprint, $content, $m) < 1) {
+            continue;
         }
-        return $found;
-    };
-    return array_values(array_diff($read($trusted), $read($revoked)));
+        $last = $m[1][count($m[1]) - 1];
+        if (preg_match('/^[0-9a-f]{64}$/', $last) === 1) {
+            $found[] = $last;
+        }
+    }
+    $gone = [];
+    foreach ($revoked as $content) {
+        if (preg_match_all('/(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])/', $content, $m) > 0) {
+            array_push($gone, ...array_map('strtolower', $m[0]));
+        }
+    }
+    return array_values(array_diff($found, $gone));
 }
 
 /**
@@ -106,32 +127,60 @@ function legotypes_fingerprints(array $trusted, array $revoked): array
  * a replayed old one verifies like a new one; the stamp beside it is signed as pkg has a
  * catalogue file signed (the signature, sha256, over the file's sha256 hex) and dates it.
  *
- * - $fetchError not null: the site could not be reached (DNS failure, connection refused,
- *   timeout, or an HTTP status other than 200 and 404); information, whatever was fetched.
- * - otherwise a null file is one the site answered 404 for: a mismatch, as is a stamp.pub
- *   whose sha256 is not in $trusted, a signature that does not verify with it, a stamp that
- *   is not exactly its three lines, one for a tree other than $tree, or one dated more
- *   than LEGOTYPES_STAMP_SKEW seconds after $now.
- * - a valid stamp is information: when the catalogue was published and how long ago.
+ * $files holds what the site answered for each of stamp, stamp.sig and stamp.pub that was
+ * fetched; $transport, when not null, is the curl failure that stopped the fetch (the file
+ * it stopped at, curl's error number and message). Availability is information, anything
+ * else short of a valid stamp is a mismatch (Monit alerts):
+ * - MISMATCH: a file over LEGOTYPES_STAMP_MAX_BYTES (curl's CURLE_FILESIZE_EXCEEDED);
+ *   an answer other than 200 and 5xx (404, a redirect, which is not followed, 403, 410 ...)
+ *   for any file fetched; a file neither answered nor stopped at by a transport failure.
+ * - INFO "could not fetch the stamp": any other transport failure (DNS, connection
+ *   refused, timeout), or a 5xx answer (an outage at the site).
+ * - with all three answered 200, MISMATCH for a stamp.pub whose sha256 is not in $trusted,
+ *   a signature that does not verify with it, a stamp that is not exactly its three lines,
+ *   or one for a tree other than $tree; INFO for a stamp dated more than
+ *   LEGOTYPES_STAMP_SKEW seconds after $now (this firewall's clock is behind: the stamp is
+ *   dated by GitHub's runner); INFO for a valid stamp: when the catalogue was published
+ *   and how long ago.
  *
+ * @param array<string, array{status: int, body: string}> $files keyed stamp, stamp.sig, stamp.pub
+ * @param ?array{file: string, errno: int, error: string} $transport
  * @param list<string> $trusted the trusted fingerprints (legotypes_fingerprints)
  * @param string $tree the <ABI>/<series> the stamp was fetched for
  * @return list<array{0: 'INFO'|'MISMATCH', 1: string}>
  */
-function legotypes_stamp_findings(?string $stamp, ?string $sig, ?string $pub, array $trusted, int $now, ?string $fetchError, string $tree): array
+function legotypes_stamp_findings(array $files, ?array $transport, array $trusted, int $now, string $tree): array
 {
-    if ($fetchError !== null) {
-        return [['INFO', "could not fetch the stamp ({$fetchError})"]];
+    if ($transport !== null && $transport['errno'] === CURLE_FILESIZE_EXCEEDED) {
+        return [['MISMATCH', "the catalogue stamp file {$transport['file']} is too large (over "
+            . LEGOTYPES_STAMP_MAX_BYTES . ' bytes)']];
     }
-    $missing = [];
-    foreach (['stamp' => $stamp, 'stamp.sig' => $sig, 'stamp.pub' => $pub] as $name => $content) {
-        if ($content === null) {
-            $missing[] = $name;
+    $refused = [];
+    $outage = null;
+    foreach (['stamp', 'stamp.sig', 'stamp.pub'] as $name) {
+        if (!isset($files[$name])) {
+            if ($transport === null) {
+                $refused[] = "{$name}: no answer";
+            }
+            continue;
+        }
+        $status = $files[$name]['status'];
+        if ($status >= 500 && $status <= 599) {
+            $outage ??= "HTTP {$status} for {$name}";
+        } elseif ($status !== 200) {
+            $refused[] = "{$name}: HTTP {$status}";
         }
     }
-    if ($stamp === null || $sig === null || $pub === null) {
-        return [['MISMATCH', 'the repository serves no catalogue stamp (not found: ' . implode(', ', $missing) . ')']];
+    if ($refused !== []) {
+        return [['MISMATCH', 'the repository answers without a catalogue stamp (' . implode(', ', $refused) . ')']];
     }
+    $unreachable = $transport !== null ? $transport['error'] : $outage;
+    if ($unreachable !== null || !isset($files['stamp'], $files['stamp.sig'], $files['stamp.pub'])) {
+        return [['INFO', 'could not fetch the stamp (' . ($unreachable ?? 'no answer') . ')']];
+    }
+    $stamp = $files['stamp']['body'];
+    $sig = $files['stamp.sig']['body'];
+    $pub = $files['stamp.pub']['body'];
     if (!in_array(hash('sha256', $pub), $trusted, true)) {
         return [['MISMATCH', 'the catalogue stamp comes with a key that is not a trusted LegoTypes fingerprint']];
     }
@@ -151,7 +200,7 @@ function legotypes_stamp_findings(?string $stamp, ?string $sig, ?string $pub, ar
     }
     $at = $published->getTimestamp();
     if ($at - $now > LEGOTYPES_STAMP_SKEW) {
-        return [['MISMATCH', "the catalogue stamp is dated {$m[1]}, ahead of this firewall's clock ("
+        return [['INFO', "catalogue stamp is dated {$m[1]}, ahead of this firewall's clock ("
             . gmdate('Y-m-d\TH:i:s\Z', $now) . ')']];
     }
     $days = intdiv(max(0, $now - $at), 86400);
