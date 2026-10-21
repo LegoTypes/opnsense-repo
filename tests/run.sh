@@ -1735,8 +1735,51 @@ echo "catalogue data" >"$T/data"
 openssl dgst -sha256 -r "$T/data" | cut -d' ' -f1 | tr -d '\n' | openssl dgst -sha256 -sign "$T/key.pem" -binary >"$T/data.sig"
 cp "$T/pub.pem" "$T/data.pub"
 tar -cf "$d/data.pkg" -C "$T" data data.sig data.pub
-vc() { PUB_KEY="$T/pub.pem" bash "$S/verify-catalogue.sh" "$@"; }
+# vstamp <tree dir> <ABI/series> [<signing key> [<published key>]]: the tree's stamp as sign-catalogue.sh
+# writes it, signed by the test key (or <signing key>), its key the published one (or <published key>)
+vstamp() {
+	printf 'published: 2026-10-21T12:00:00Z\nrun: 4815162342\ntree: %s\n' "$2" >"$1/stamp"
+	openssl dgst -sha256 -r "$1/stamp" | cut -d' ' -f1 | tr -d '\n' |
+		openssl dgst -sha256 -sign "${3:-$T/key.pem}" -binary >"$1/stamp.sig"
+	cp "${4:-$T/pub.pem}" "$1/stamp.pub"
+}
+vstamp "$d" FreeBSD:15:amd64/26.7
+# the published key is the script's own checkout's; the harness copy names the test key instead
+expect_eq "verify-catalogue.sh: the published key from the script's location, one literal line, no override" \
+	"$(anchor "$root/scripts/verify-catalogue.sh" pub 'pub=$here/../keys/legotypes-pkg-signing.pub')" "1 1"
+sed "s|^pub=.*|pub=$T/pub.pem|" "$root/scripts/verify-catalogue.sh" >"$S/verify-catalogue.sh"
+vc() { bash "$S/verify-catalogue.sh" "$@"; }
 expect_eq "verify: a good publish" "$(vc os-alpha >/dev/null; echo "rc=$?")" "rc=0"
+expect_eq "verify: the stamp is reported" "$(vc os-alpha 2>/dev/null | grep -c '^FreeBSD:15:amd64/26.7: stamp verified, published 2026-10-21T12:00:00Z$')" 1
+expect_fail "verify: PUB_KEY changes nothing (the real key did not sign this catalogue)" \
+	env PUB_KEY="$T/pub.pem" bash "$root/scripts/verify-catalogue.sh" os-alpha
+for f in stamp stamp.sig stamp.pub; do
+	mv "$d/$f" "$T/$f.away"
+	expect_fail "verify: a tree without its $f" vc os-alpha
+	mv "$T/$f.away" "$d/$f"
+done
+vstamp "$d" FreeBSD:15:amd64/26.7 "$T/other.pem"
+expect_fail "verify: a stamp signed by another key" vc os-alpha
+vstamp "$d" FreeBSD:15:amd64/26.7 "$T/other.pem" "$T/other.pub"
+expect_fail "verify: a stamp signed and keyed by another key" vc os-alpha
+vstamp "$d" FreeBSD:15:amd64/26.7 "$T/key.pem" "$T/other.pub"
+expect_fail "verify: a stamp signed by the published key but carrying another" vc os-alpha
+vstamp "$d" FreeBSD:15:amd64/26.7
+sed -i.bak 's/^published: .*/published: 2099-01-01T00:00:00Z/' "$d/stamp" && rm "$d/stamp.bak"
+expect_fail "verify: a stamp changed after signing" vc os-alpha
+vstamp "$d" FreeBSD:15:amd64/26.1
+expect_fail "verify: a stamp for another tree" vc os-alpha
+vstamp "$d" FreeBSD:15:amd64/26.7
+# two trees served: the frozen one's stamp is checked too
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.1 FreeBSD:15:amd64/26.7'
+d1="$T/livesite/FreeBSD:15:amd64/26.1/latest"
+mkdir -p "$d1"
+cp "$d/data.pkg" "$d1/"
+expect_fail "verify: a frozen tree without a stamp" vc os-alpha
+vstamp "$d1" FreeBSD:15:amd64/26.1
+expect_eq "verify: both trees' stamps" "$(vc os-alpha 2>/dev/null | grep -c ': stamp verified, published ')" 2
+rm -rf "$T/livesite/FreeBSD:15:amd64/26.1"
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 live os-alpha-1.0
 expect_fail "verify: the tree serves an older build" vc os-alpha
 live os-alpha-1.1
