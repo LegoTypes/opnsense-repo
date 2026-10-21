@@ -330,6 +330,31 @@ expect_fail "build: this repository's package from a shallow checkout" \
 expect_fail "build: this repository's package without GITHUB_SHA" \
 	vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo -- build-package.sh os-vendor
 
+# the approved commit (second argument): checked out and reachable from the branch; the stub make
+# records its arguments in $W/make.args
+ok=$(printf 'a1b2c3d4e5%.0s' 1 2 3 4 | cut -c1-40)
+other=$(printf 'f0e1d2c3b4%.0s' 1 2 3 4 | cut -c1-40)
+bp() { vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 "STUB_MAKE_ARGS=$W/make.args" "$@"; }
+bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha "$ok" >/dev/null
+expect_eq "build commit: the named commit is built" "$(cat "$W/out/source")" "Built from Org/plugins, branch br-alpha, commit $ok."
+expect_eq "build commit: a plugin row passes no PLUGIN_HASH" "$(rg -c PLUGIN_HASH "$W/make.args" || echo 0)" "0"
+expect_eq "build commit: PLUGIN_DEVEL= is still passed" "$(rg -c -w 'PLUGIN_DEVEL=' "$W/make.args")" "1"
+bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha >/dev/null
+expect_eq "build commit: none given builds the branch head" "$(cat "$W/out/source")" "Built from Org/plugins, branch br-alpha, commit $commit."
+expect_fail "build commit: not on the branch" bp STUB_PKGS=os-alpha-1.1.pkg STUB_GIT_OFF_BRANCH=1 -- build-package.sh os-alpha "$ok"
+expect_fail "build commit: checkout lands elsewhere" bp STUB_PKGS=os-alpha-1.1.pkg "STUB_GIT_CHECKOUT_AS=$other" -- build-package.sh os-alpha "$ok"
+expect_fail "build commit: not 40 hex digits" bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha abc123
+expect_fail "build commit: upper case" bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha "$(echo "$ok" | tr a-f A-F)"
+expect_fail "build commit: a third argument" bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha "$ok" extra
+bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo "GITHUB_SHA=$ok" -- build-package.sh os-vendor "$ok" >/dev/null
+expect_eq "build commit: this repository's package passes the 9-digit PLUGIN_HASH" \
+	"$(rg -c -w "PLUGIN_HASH=${ok:0:9}" "$W/make.args")" "1"
+expect_eq "build commit: this repository's package keeps PLUGIN_DEVEL=" "$(rg -c -w 'PLUGIN_DEVEL=' "$W/make.args")" "1"
+bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo "GITHUB_SHA=$ok" -- build-package.sh os-vendor >/dev/null
+expect_eq "build commit: this repository's package without a commit passes no PLUGIN_HASH" "$(rg -c PLUGIN_HASH "$W/make.args" || echo 0)" "0"
+expect_fail "build commit: this repository's package, commit is not GITHUB_SHA" \
+	bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo "GITHUB_SHA=$other" -- build-package.sh os-vendor "$ok"
+
 conf 'os-alpha      Org/plugins br   net/alpha        yes' \
 	'os-beta       Org/plugins br   net/beta         no' \
 	'os-legotypes  .           main vendor/legotypes yes'

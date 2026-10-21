@@ -1,7 +1,11 @@
 #!/bin/sh
 # A stand-in for the git calls build-package.sh makes in the VM.
 #   git clone --quiet --depth 1 --branch <branch> <url> <dir>   records "<url> <branch>" in <dir>/.cloned
-#   git -C <dir> rev-parse [--short] HEAD                          prints a fixed commit
+#   git -C <dir> rev-parse HEAD                                    prints a fixed commit, or the one last checked out
+#   git -C <dir> fetch --quiet --depth 1 origin <commit>           succeeds
+#   git -C <dir> fetch --quiet --unshallow origin <refspec>        succeeds
+#   git -C <dir> checkout --quiet <commit>                         moves HEAD there (to STUB_GIT_CHECKOUT_AS when set)
+#   git -C <dir> merge-base --is-ancestor <commit> origin/<branch> fails when STUB_GIT_OFF_BRANCH is set
 #   git -c safe.directory=<cwd> log -1 --format=%H -- <dir>                                prints another fixed commit, the
 #                                                                  last change to <dir> (nothing when
 #                                                                  STUB_GIT_SHALLOW is set)
@@ -24,7 +28,24 @@ clone)
 	mkdir -p "$2/Mk"
 	echo "Mk from $1" >"$2/Mk/plugins.mk"
 	;;
--C) echo 0123456789abcdef0123456789abcdef01234567 ;;
+-C)
+	dir=$2
+	shift 2
+	case $1 in
+	rev-parse)
+		if [ -f "$dir/.head" ]; then cat "$dir/.head"; else echo 0123456789abcdef0123456789abcdef01234567; fi
+		;;
+	fetch) ;;
+	checkout)
+		echo "${STUB_GIT_CHECKOUT_AS:-$3}" >"$dir/.head"
+		;;
+	merge-base) [ -z "${STUB_GIT_OFF_BRANCH:-}" ] ;;
+	*)
+		echo "stub git: unsupported: -C $dir $*" >&2
+		exit 2
+		;;
+	esac
+	;;
 log)
 	# as in the build VM: the workspace belongs to another user, so git refuses it unless the
 	# caller passes -c safe.directory=<the workspace>

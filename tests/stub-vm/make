@@ -1,7 +1,9 @@
 #!/bin/sh
 # A stand-in for "make -C <dir> package ...": writes the files named in
-# $STUB_PKGS (space-separated) into <dir>/work/pkg/.
+# $STUB_PKGS (space-separated) into <dir>/work/pkg/. Its arguments go to the file
+# $STUB_MAKE_ARGS, one per line, when that is set.
 set -eu
+[ -z "${STUB_MAKE_ARGS:-}" ] || printf '%s\n' "$@" >"$STUB_MAKE_ARGS"
 [ "$1" = -C ] && [ "$3" = package ] || {
 	echo "stub make: unsupported: $*" >&2
 	exit 2

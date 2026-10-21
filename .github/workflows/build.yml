@@ -11,6 +11,10 @@ on:
       package:
         type: string
         required: true
+      commit:
+        description: The full commit to build, as the owner approved it
+        type: string
+        required: true
       catalogue:
         type: boolean
         required: true
@@ -41,6 +45,7 @@ jobs:
     env:
       PACKAGE: ${{ inputs.package }}
       CATALOGUE: ${{ inputs.catalogue }}
+      COMMIT: ${{ inputs.commit }}
     steps:
       # no token in .git: the workspace is copied into the build VM
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -49,10 +54,18 @@ jobs:
           # the full history: the vendor package's source line names the last commit that changed it
           fetch-depth: 0
 
-      - name: Check the package against packages.conf
+      - name: Check the package and the commit
         run: |
+          if ! [[ $COMMIT =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::the commit must be the full 40 lower-case hex digits, not $COMMIT"
+            exit 1
+          fi
           row=$(sh scripts/packages.sh row "$PACKAGE")
-          read -r _repo _branch _dir listed <<<"$row"
+          read -r repo _branch _dir listed <<<"$row"
+          if [ "$repo" = . ] && [ "$COMMIT" != "$GITHUB_SHA" ]; then
+            echo "::error::$PACKAGE is built from this repository at the run's commit $GITHUB_SHA, not $COMMIT: dispatch from main at that commit"
+            exit 1
+          fi
           want=no
           [ "$CATALOGUE" != true ] || want=yes
           if [ "$listed" != "$want" ]; then
@@ -98,12 +111,12 @@ jobs:
         with:
           release: "15"
           usesh: true
-          envs: PACKAGE CATALOGUE GITHUB_REPOSITORY GITHUB_SHA UPSTREAM_PHP UPSTREAM_PYTHON
+          envs: PACKAGE CATALOGUE COMMIT GITHUB_REPOSITORY GITHUB_SHA UPSTREAM_PHP UPSTREAM_PYTHON
           prepare: pkg install -y git
           run: |
             set -e
             umask 022
-            sh scripts/build-package.sh "$PACKAGE"
+            sh scripts/build-package.sh "$PACKAGE" "$COMMIT"
             if [ "$CATALOGUE" = true ]; then
               sh scripts/sign-catalogue.sh
             fi

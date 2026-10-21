@@ -17,6 +17,12 @@ on:
           - os-wan-failover
           - os-unbound-upstream
           - os-legotypes
+      commit:
+        description: >-
+          The full 40-character commit to build and publish (git rev-parse origin/main for
+          os-legotypes; a commit on the package's branch otherwise)
+        type: string
+        required: true
 
 permissions: {}
 
@@ -31,6 +37,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       package: ${{ inputs.package }}
+      commit: ${{ inputs.commit }}
       catalogue: true
     # A called workflow sees only the secrets its caller passes, even for the
     # environment its job names: without this PKG_SIGNING_KEY arrives empty
