@@ -2,7 +2,7 @@
 # canary-report.sh <title> <findings-file> <run-url>
 # Keep one open issue (label "canary") per title in step with canary-findings.sh
 # output: any MATERIAL line opens the issue or replaces its body; none closes an
-# open one with a comment. LOG lines (a failed build's log) become one code block.
+# open one with a comment. LOG lines (a failed build's log) become one code block, fenced by more backticks than any line holds.
 # The body is cut to stay within GitHub's limit. Prints opened, updated, closed or
 # clean. An unreadable issue list fails the script, so it can never open a duplicate.
 # gh takes the repository from GH_REPO and the token from GH_TOKEN.
@@ -24,10 +24,29 @@ number=$(jq -r --arg t "$title" '[.[] | select(.title == $t)] | if length > 1 th
 [[ $number != many ]] || die "two open issues are titled $title; close one"
 
 if grep -q '^MATERIAL: ' "$findings"; then
+	# a LOG block is fenced by a backtick run one longer than the longest run in its lines
+	# (three at least), so no log line can close it
 	findings_md=$(awk '
-		/^LOG: / { if (!inlog) { print "```"; inlog = 1 } print substr($0, 6); next }
-		{ if (inlog) { print "```"; inlog = 0 } sub(/^MATERIAL: /, "- **MATERIAL**: "); sub(/^NOTE: /, "- **NOTE**: "); print }
-		END { if (inlog) print "```" }
+		function flush(   fence, i) {
+			if (!n) return
+			fence = "```"
+			while (length(fence) <= longest) fence = fence "`"
+			print fence
+			for (i = 1; i <= n; i++) print buf[i]
+			print fence
+			n = 0; longest = 0
+		}
+		/^LOG: / {
+			line = substr($0, 6); buf[++n] = line
+			rest = line
+			while (match(rest, /`+/)) {
+				if (RLENGTH > longest) longest = RLENGTH
+				rest = substr(rest, RSTART + RLENGTH)
+			}
+			next
+		}
+		{ flush(); sub(/^MATERIAL: /, "- **MATERIAL**: "); sub(/^NOTE: /, "- **NOTE**: "); print }
+		END { flush() }
 	' "$findings")
 	limit=60000
 	if [[ ${#findings_md} -gt $limit ]]; then

@@ -14,9 +14,18 @@
 #   FREEBSD=  the FreeBSD release core was built on (major.minor)
 # Any fetch or parse failure fails the script: a build or the canary must never
 # fall back to stale values.
+# The catalogue is verified as pkg verifies it (signature_type "fingerprints"): the
+# sha256 of packagesite.yaml.pub must be a fingerprint in a file under keys/upstream/
+# (OPNsense's, copied from opnsense/core; found from this script's own location, with
+# no environment override), and packagesite.yaml.sig must verify over the sha256 hex
+# of packagesite.yaml with that key, as sign-catalogue.sh checks our own catalogue. A
+# key rotation upstream fails here: add the new fingerprint file, copied from core.
+# Runs on the runner (build.yml, canary.yml), with tar reading zstd (Ubuntu's GNU tar
+# with zstd installed, or bsdtar) and openssl.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
+keys="$here/../keys/upstream"
 mirror=${UPSTREAM_MIRROR:-https://pkg.opnsense.org}
 
 die() {
@@ -53,8 +62,16 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 curl -fsSL -o "$work/packagesite.pkg" "$mirror/$abi/$want/latest/packagesite.pkg" ||
 	die "cannot fetch the $want catalogue"
-tar -xf "$work/packagesite.pkg" -C "$work" packagesite.yaml 2>/dev/null ||
-	die "the $want catalogue holds no packagesite.yaml"
+tar -xf "$work/packagesite.pkg" -C "$work" packagesite.yaml packagesite.yaml.sig packagesite.yaml.pub 2>/dev/null ||
+	die "the $want catalogue lacks packagesite.yaml, its signature or its key"
+[[ -s $work/packagesite.yaml.sig && -s $work/packagesite.yaml.pub ]] || die "the $want catalogue's signature or key is empty"
+fingerprint=$(openssl dgst -sha256 -r "$work/packagesite.yaml.pub" | cut -d' ' -f1)
+[[ $fingerprint =~ ^[0-9a-f]{64}$ ]] || die "cannot fingerprint the $want catalogue's key"
+cat "$keys"/* 2>/dev/null | grep -qxF "fingerprint: \"$fingerprint\"" ||
+	die "the $want catalogue is signed with a key (sha256 $fingerprint) that is no fingerprint in $keys"
+openssl dgst -sha256 -r "$work/packagesite.yaml" | cut -d' ' -f1 | tr -d '\n' |
+	openssl dgst -sha256 -verify "$work/packagesite.yaml.pub" -signature "$work/packagesite.yaml.sig" >/dev/null 2>&1 ||
+	die "the $want catalogue's signature does not verify"
 core=$(jq -c 'select(.name == "opnsense")' "$work/packagesite.yaml") || die "the $want catalogue does not parse"
 [[ -n $core && $core != *$'\n'* ]] || die "the $want catalogue does not hold exactly one opnsense package"
 

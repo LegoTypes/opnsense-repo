@@ -984,13 +984,17 @@ mirror() {
 		mkdir -p "$STUB_MIRROR/FreeBSD:15:amd64/$s/latest"
 	done
 }
-# site <series> <json line...>: that series' catalogue (packagesite.pkg holding packagesite.yaml)
+# site <series> <json line...>: that series' catalogue (packagesite.pkg holding packagesite.yaml,
+# and its .sig and .pub made as pkg makes them: the signature over the file's sha256 hex, by the test key)
 site() {
 	local s=$1 d
 	shift
 	d=$(mktemp -d)
 	printf '%s\n' "$@" >"$d/packagesite.yaml"
-	tar -cf "$STUB_MIRROR/FreeBSD:15:amd64/$s/latest/packagesite.pkg" -C "$d" packagesite.yaml
+	openssl dgst -sha256 -r "$d/packagesite.yaml" | cut -d' ' -f1 | tr -d '\n' |
+		openssl dgst -sha256 -sign "$T/key.pem" -out "$d/packagesite.yaml.sig"
+	cp "$T/pub.pem" "$d/packagesite.yaml.pub"
+	tar -cf "$STUB_MIRROR/FreeBSD:15:amd64/$s/latest/packagesite.pkg" -C "$d" packagesite.yaml.sig packagesite.yaml.pub packagesite.yaml
 	rm -rf "$d"
 }
 core() { # core <version> <FreeBSD_version> <dependency names...>
@@ -999,7 +1003,13 @@ core() { # core <version> <FreeBSD_version> <dependency names...>
 	jq -cn --arg v "$v" --arg f "$f" --args '{name: "opnsense", version: $v,
 		annotations: {FreeBSD_version: $f}, deps: ($ARGS.positional | map({key: ., value: {}}) | from_entries)}' "$@"
 }
-up() { REPO_CONF="$T/repo.conf" bash "$root/scripts/upstream.sh" "$@"; }
+# the harness runs a copy of upstream.sh with its fingerprint directory (the one line that
+# names it) substituted: the production script honours no environment override of it
+mkdir -p "$T/upcopy/scripts" "$T/upfp"
+cp "$root/scripts/repo.sh" "$T/upcopy/scripts/"
+sed "s|^keys=.*|keys=$T/upfp|" "$root/scripts/upstream.sh" >"$T/upcopy/scripts/upstream.sh"
+printf 'function: "sha256"\nfingerprint: "%s"\n' "$(openssl dgst -sha256 -r "$T/pub.pem" | cut -d' ' -f1)" >"$T/upfp/test"
+up() { REPO_CONF="$T/repo.conf" bash "$T/upcopy/scripts/upstream.sh" "$@"; }
 rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 mirror 26.1 26.7
 site 26.7 "$(core 26.7.5 1501000 php85-curl php85-xml py313-requests pkg)" '{"name":"php85","version":"8.5.10"}'
@@ -1028,6 +1038,53 @@ printf '<a href="sets/">sets/</a>\n' >"$STUB_MIRROR/index.html"
 expect_fail "mirror without our ABI" up
 rm -rf "$STUB_MIRROR"
 expect_fail "mirror unreachable" up
+
+# the catalogue's signature: signed by the test key (above) passes; everything else fails closed
+mirror 26.7
+site 26.7 "$(core 26.7.5 1501000 php85-curl py313-requests)"
+expect_eq "upstream: a catalogue signed by a trusted key" "$(up | grep '^CORE=')" "CORE=26.7.5"
+pk_dir="$T/upsite"
+repack() { # repack <member to leave out>: the catalogue again without that member
+	rm -rf "$pk_dir"
+	mkdir -p "$pk_dir"
+	tar -xf "$STUB_MIRROR/FreeBSD:15:amd64/26.7/latest/packagesite.pkg" -C "$pk_dir"
+	[[ -z ${1:-} ]] || rm "$pk_dir/$1"
+	(cd "$pk_dir" && tar -cf "$STUB_MIRROR/FreeBSD:15:amd64/26.7/latest/packagesite.pkg" packagesite.yaml*)
+}
+repack packagesite.yaml.sig
+expect_fail "upstream: no signature" up
+site 26.7 "$(core 26.7.5 1501000 php85-curl py313-requests)"
+repack packagesite.yaml.pub
+expect_fail "upstream: no key" up
+site 26.7 "$(core 26.7.5 1501000 php85-curl py313-requests)"
+repack
+sed -i.bak 's/26\.7\.5/26.7.6/' "$pk_dir/packagesite.yaml"
+(cd "$pk_dir" && tar -cf "$STUB_MIRROR/FreeBSD:15:amd64/26.7/latest/packagesite.pkg" packagesite.yaml.sig packagesite.yaml.pub packagesite.yaml)
+expect_fail "upstream: tampered catalogue" up
+site 26.7 "$(core 26.7.5 1501000 php85-curl py313-requests)"
+repack
+openssl rsa -in "$T/other.pem" -pubout -out "$pk_dir/packagesite.yaml.pub" 2>/dev/null
+openssl dgst -sha256 -r "$pk_dir/packagesite.yaml" | cut -d' ' -f1 | tr -d '\n' |
+	openssl dgst -sha256 -sign "$T/other.pem" -out "$pk_dir/packagesite.yaml.sig"
+(cd "$pk_dir" && tar -cf "$STUB_MIRROR/FreeBSD:15:amd64/26.7/latest/packagesite.pkg" packagesite.yaml.sig packagesite.yaml.pub packagesite.yaml)
+expect_fail "upstream: signed by a key that is no trusted fingerprint" up
+site 26.7 "$(core 26.7.5 1501000 php85-curl py313-requests)"
+repack
+openssl dgst -sha256 -r "$pk_dir/packagesite.yaml" | cut -d' ' -f1 | tr -d '\n' |
+	openssl dgst -sha256 -sign "$T/other.pem" -out "$pk_dir/packagesite.yaml.sig"
+(cd "$pk_dir" && tar -cf "$STUB_MIRROR/FreeBSD:15:amd64/26.7/latest/packagesite.pkg" packagesite.yaml.sig packagesite.yaml.pub packagesite.yaml)
+expect_fail "upstream: a trusted key with another key's signature" up
+site 26.7 "$(core 26.7.5 1501000 php85-curl py313-requests)"
+rm "$T/upfp/test"
+expect_fail "upstream: no fingerprint file" up
+: >"$T/upfp/test"
+expect_fail "upstream: an empty fingerprint file" up
+rm -rf "$T/upfp"
+expect_fail "upstream: no fingerprint directory" up
+expect_eq "upstream: the production script reads no environment variable for its key directory" \
+	"$(grep -c '^keys="\$here/../keys/upstream"$' "$root/scripts/upstream.sh") $(grep -E '^keys=|keys/upstream' "$root/scripts/upstream.sh" | grep -c '\$[{]\?[A-Z_]\+')" "1 0"
+expect_eq "upstream: the vendored OPNsense fingerprint" "$(cat "$root"/keys/upstream/pkg.opnsense.org.20260608)" \
+	$'function: "sha256"\nfingerprint: "9f3b76ffef38fb6405595038b324b61043c9a2c375ae5c151d628508e9a845ce"'
 unset STUB_MIRROR STUB_MIRROR_URL UPSTREAM_MIRROR
 
 # --- compare-package.sh -------------------------------------------------------
@@ -1510,6 +1567,12 @@ printf 'MATERIAL: build failed\nLOG: cc: error one\nLOG: *** Error code 1\n' >"$
 crep >/dev/null
 expect_eq "report: log lines become one code block" "$(sed -n '/^```$/,/^```$/p' "$STUB/issue_calls" | tr '\n' '|')" \
 	'```|cc: error one|*** Error code 1|```|'
+: >"$STUB/issue_calls"
+printf 'MATERIAL: build failed\nLOG: a ``` b\nLOG: c ````` d\nLOG: ok\n' >"$T/findings"
+crep >/dev/null
+expect_eq "report: a log line with backticks cannot close the block" \
+	"$(sed -n '/^``````$/,$p' "$STUB/issue_calls" | tr '\n' '|' | sed 's/Run:.*//')" \
+	'``````|a ``` b|c ````` d|ok|``````|'"|"
 : >"$STUB/issue_calls"
 { echo "MATERIAL: build failed"; for i in $(seq 1 3000); do printf 'LOG: %050d\n' "$i"; done; } >"$T/findings"
 crep >/dev/null
