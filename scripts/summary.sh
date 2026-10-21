@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # summary.sh <package> <out dir> <review dir>
 # Markdown for the review job's summary ($GITHUB_STEP_SUMMARY), what the owner reads before
-# approving the sign job: the approved commit; the built file (<out dir>, the build job's
+# approving the sign job: first a fixed line saying this summary, under the review job, is the
+# only one to read, and that the build job writes none (text under the build job's summary means
+# its runner was tampered with); then the approved commit; the built file (<out dir>, the build job's
 # artifact), its sha256 and the source line its release notes will start with; the manifest,
 # whose carry lines the sign job must find unchanged; the payload check (payload.sh:
 # informational here, the sign job enforces it), with the install scripts as pkg will run
@@ -69,6 +71,7 @@ while IFS= read -r m; do
 	versions+="$m"$'\n'"$text"$'\n'
 done <<<"$members"
 
+printf '%s\n\n' "**Read this summary, under the review job, and no other. The build job writes none: any summary under the build job means its runner was tampered with, so reject the run (cancel it; do not approve).**"
 # shellcheck disable=SC2016 # the backticks are markdown, a code span
 printf '## %s at `%s`\n\n' "$pkg" "$COMMIT"
 printf 'Approve the sign job only for this build. What the build made is shown as it is, in code blocks.\n\n'

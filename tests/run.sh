@@ -248,6 +248,17 @@ ymarks() {
 ystep() { awk -v w="$2" 'index(" " $0 " ", " " w " ") { print NR; exit }' <<<"$1"; }
 # yjobs <flattened>: the workflow's jobs, in order
 yjobs() { awk -F'\t' '$1 ~ /^jobs\./ { split($1, a, "."); if (!s[a[2]]++) print a[2] }' <<<"$1"; }
+# foreign <flattened>: each uses: that is not actions/<name>@<full commit>, the one VM action at
+# its pinned commit, or a workflow of this repository (the repository's Actions policy allows these only)
+foreign() {
+	local p v out=''
+	while IFS=$'\t' read -r p v; do
+		[[ $p == *.uses ]] || continue
+		[[ $v =~ ^actions/[A-Za-z0-9_.-]+@[0-9a-f]{40}$ || $v == vmactions/freebsd-vm@a2f9a41fa97f6848b8c3b791087dfcdaa5b473ff ||
+			$v =~ ^\./\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml$ ]] || out+="$p=$v "
+	done <<<"$1"
+	printf '%s' "$out"
+}
 wf="$root/.github/workflows"
 B=$(yflat "$wf/build.yml")
 P=$(yflat "$wf/publish.yml")
@@ -271,6 +282,7 @@ for w in build publish canary; do
 	else
 		expect_eq "$w.yml: every action pinned to a full commit" "$unpinned" ""
 	fi
+	expect_eq "$w.yml: every action is GitHub's own, the pinned VM action or this repository's workflow" "$(foreign "$f")" ""
 	unsafe=''
 	while IFS=$'\t' read -r p v; do
 		[[ $p =~ ^(jobs\.[^.]+\.steps\.[0-9]+)\.uses$ && $v == actions/checkout@* ]] || continue
@@ -292,6 +304,12 @@ for w in build publish canary; do
 		expect_eq "$w.yml: every job runs on ubuntu-24.04" "$mis" ""
 	fi
 done
+h40=$(printf 'a%.0s' {1..40})
+printf 'jobs:\n  x:\n    steps:\n      - uses: %s\n      - uses: %s\n      - uses: %s\n      - uses: %s\n      - uses: %s\n      - uses: %s\n' \
+	"someone/action@$h40" actions/checkout@v7 "actions/cache/save@$h40" docker://alpine:3 "vmactions/freebsd-vm@$h40" \
+	"actions/checkout@$h40" >"$T/mutant.yml"
+expect_eq "foreign: a third-party action, a tag, a sub-action, a container and another VM commit are refused" \
+	"$(foreign "$(yflat "$T/mutant.yml")" | wc -w | tr -d ' ')" 5
 expect_eq "canary.yml: no environment and no secret" "$(awk -F'\t' '$1 ~ /environment/ || $2 ~ /secrets/' <<<"$C")" ""
 
 # publish.yml: the approved commit, passed on; the deploy and the release wait for the whole
@@ -430,6 +448,33 @@ done
 expect_eq "sign: the carried releases must be the review job's manifest's" \
 	"$(yget "$B" "jobs.sign.steps.$(ystep "$sm" carry-forward.sh).env.MANIFEST")" review/manifest
 expect_eq "sign: the Pages site is site/" "$(yget "$B" "jobs.sign.steps.$(ystep "$sm" actions/upload-pages-artifact).with.path")" site
+# a re-run of sign after the artifacts expired: both downloads go on when theirs is gone, and the check
+# step refuses anything but their success first, with its own message
+for id in package review; do
+	n=$(awk -F'\t' -v id="$id" '$1 ~ /^jobs\.sign\.steps\.[0-9]+\.id$/ && $2 == id { split($1, a, "."); print a[4] }' <<<"$B")
+	expect_eq "sign: the $id download goes on when the artifact is gone" \
+		"$(yget "$B" "jobs.sign.steps.$n.continue-on-error") $(yget "$B" "jobs.sign.steps.$n.uses" | sed 's/@.*//') $(yget "$B" "jobs.sign.steps.$n.with.name")" \
+		"true actions/download-artifact $id"
+done
+expect_eq "sign: the check reads both downloads' outcomes" \
+	"$(yget "$B" "jobs.sign.steps.$chk_step.env.PACKAGE_ARTIFACT") $(yget "$B" "jobs.sign.steps.$chk_step.env.REVIEW_ARTIFACT")" \
+	'${{ steps.package.outcome }} ${{ steps.review.outcome }}'
+expect_eq "sign: and refuses anything but success before it reads the files" \
+	"$(yget "$B" "jobs.sign.steps.$chk_step.run" | head -4 | tr '\n' ';')" \
+	'if [ "$PACKAGE_ARTIFACT" != success ] || [ "$REVIEW_ARTIFACT" != success ]; then;echo "::error::no package artifact: re-run the whole workflow";exit 1;fi;'
+# the approver reads the review job's summary only, and the build job writes none: text under the build
+# job's summary means its runner was tampered with. Only review's summary step names the summary file,
+# and no script the build job runs does.
+# writers <flattened>: the paths of the values that name GITHUB_STEP_SUMMARY
+writers() { awk -F'\t' 'index($2, "GITHUB_STEP_SUMMARY") { print $1 }' <<<"$1" | tr '\n' ' '; }
+expect_eq "build.yml: only the review job's summary step writes the job summary" "$(writers "$B")" \
+	"jobs.review.steps.$(ystep "$rv" summary.sh).run "
+for s in packages.sh upstream.sh out-dir.sh build-package.sh; do
+	expect_eq "build: $s, which the build job runs, names no job summary" "$(grep -c GITHUB_STEP_SUMMARY "$root/scripts/$s")" 0
+done
+awk '{ print } /^  build:$/ { b = 1 } b && /^    steps:$/ { print "      - run: echo \"## Approve\" >> \"$GITHUB_STEP_SUMMARY\""; b = 0 }' \
+	"$wf/build.yml" >"$T/mutant.yml"
+expect_eq "writers: a build job step writing the summary is found" "$(writers "$(yflat "$T/mutant.yml")" | wc -w | tr -d ' ')" 2
 
 # --- release.sh and carry-forward.sh -----------------------------------------
 export PATH="$root/tests/stub:$PATH" GH_REPO=Org/repo
@@ -2298,6 +2343,8 @@ smr() {
 soset '.scripts["post-install"] = "echo ``` and ```` PKGTEXT\n````\nexit 0"'
 s=$(smr 2>/dev/null) || bad "summary: exited non-zero"
 o=$(outside <<<"$s")
+expect_eq "summary: it opens by saying it is the one summary to read" "$(head -n 1 <<<"$s")" \
+	"**Read this summary, under the review job, and no other. The build job writes none: any summary under the build job means its runner was tampered with, so reject the run (cancel it; do not approve).**"
 expect_eq "summary: every fence closes" "$(grep -c UNCLOSED <<<"$o")" 0
 expect_eq "summary: no package text outside a fence" \
 	"$(grep -cE 'PKGTEXT|payload:|script |product_|/usr/local|abi:|Built from|built os-alpha|```' <<<"$o")" 0
