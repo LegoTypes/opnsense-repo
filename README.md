@@ -17,16 +17,27 @@ The plugins, what they do and how to install them: <https://legotypes.github.io>
 | `os-legotypes` | this repository, `vendor/legotypes` on `main` | catalogue, `publish` |
 
 1. Commit the change on its branch with a `PLUGIN_VERSION` or `PLUGIN_REVISION` bump and push it. A run whose version already has a release fails before anything is published: pkg would not see an unchanged version as an update.
-2. Start the workflow: `gh workflow run publish -R LegoTypes/opnsense-repo -f package=<package>`.
-3. Approve the `release` environment when the run waits; it holds the signing key.
-4. `publish` builds the package in FreeBSD 15, adds the other catalogue packages from their releases (each checked against the sha256 in its release notes), signs the catalogue, deploys it to Pages and, only then, records the build as the release `<package>-<version>`.
+2. Start the workflow at the commit to publish, named in full. For `os-legotypes`, from `main` at its head (after a `git fetch`): `gh workflow run publish -R LegoTypes/opnsense-repo -f package=os-legotypes -f commit=$(git rev-parse origin/main)`; the run refuses any commit but the one it runs at. For a plugin, a commit on its branch, for example `gh workflow run publish -R LegoTypes/opnsense-repo -f package=os-wan-failover -f commit=$(git -C <plugins checkout> rev-parse origin/add-wan-failover)`; a commit that is not on the package's branch is refused.
+3. The `build` job builds exactly that commit in FreeBSD 15. It holds no secret and names no environment. It ends with a summary on the run's page; read it before approving:
+   - the commit, the built file with its sha256, and the source line its release notes will start with;
+   - the manifest: every release that will be carried forward, with the sha256 its notes record and whether it is immutable;
+   - the payload check: whether the package holds exactly what the plugin source at the commit installs, and its install scripts as pkg will run them (the one part of a package not taken from `src/`);
+   - the material differences from the package's newest release (`compare-package.sh`, as the canary reports them);
+   - the version file the package installs, and the build environment.
+
+   Everything the build made is shown as it is, in code blocks.
+4. Approve the `release` environment only for the build you meant. Its `sign` job holds the signing key and runs only GitHub's own actions and this repository's scripts. Before the key is staged it checks the package against the plugin source at the commit again, and refuses one that fails the payload check; it builds `pkg` from the source pinned in [`repo.conf`](repo.conf), and carries the other catalogue packages forward from their releases, each checked against the sha256 in its notes, refusing any change from the approved manifest. It then signs the catalogue and stamps each served tree. `publish` deploys it to Pages and, only then, records the build as the release `<package>-<version>`.
 5. Firewalls update from System > Firmware > Plugins, or with `pkg upgrade`.
 
-**If a run fails after its deploy** (the catalogue went live but the `release` job did not create the release): use **Re-run failed jobs** on that run; its artifact still holds the deployed build. Never start a new publish for it: that would rebuild from the branch head under the same version. Until the release exists, every publish fails at carry-forward, which checks that the live catalogue serves exactly each package's newest release, so nothing is silently rolled back.
+The site serves the signed repository, its public key and `packages.txt`, and no package at its root: `os-legotypes` itself installs from the signed repository (<https://legotypes.github.io/install/>).
+
+**If the `sign` job fails** (a payload check, a release changed since approval), nothing was published: fix the cause and start a new publish. It reports "no package artifact: re-run the whole workflow" when the build's artifact is gone; use **Re-run all jobs**.
+
+**If a run fails after its deploy** (the catalogue went live but the `release` job did not create the release): use **Re-run failed jobs** on that run; its artifact still holds the deployed build. Never start a new publish for it: that would build it again, a different file under the same version. Until the release exists, every publish fails at carry-forward, which checks that the live catalogue serves exactly each package's newest release, so nothing is silently rolled back.
 
 A bad release is replaced by publishing a newer version: pkg never downgrades. Releases `publish-N` are the builds from before per-package publishing (all packages at once) and are kept as history.
 
-The workflows run the scripts in [`scripts/`](scripts); `bash tests/run.sh` tests them with stand-ins for `gh`, `git`, `make`, `pkg` and `curl`.
+The workflows run the scripts in [`scripts/`](scripts); `bash tests/run.sh` tests them with stand-ins for `gh`, `git`, `make`, `pkg`, `curl` and `apt-get`.
 
 After a publish, `bash scripts/verify-catalogue.sh <package>` checks what firewalls will check: every served
 catalogue's signature, that the target series serves the package's newest release, and that the release asset
@@ -64,7 +75,8 @@ The canary never publishes. A finding is acted on by a person:
    - Its scenario harness where one exists.
    - The install rehearsal through the setup script with `OPNSENSE_HOST` pointing at the test VM.
 4. **Publish.** Push the branch, then run `gh workflow run publish -R LegoTypes/opnsense-repo -f
-   package=<package>`, approve `release`, and run `bash scripts/verify-catalogue.sh <package>`.
+   package=<package> -f commit=<the branch's commit>`, read the build job's summary, approve `release`, and
+   run `bash scripts/verify-catalogue.sh <package>`.
 5. **Firewall.**
    - A new plugin installs with its setup-script command (for example `opnsense install-wan-failover`).
    - Upgrades go through `opnsense upgrade-legotypes [package]`.
