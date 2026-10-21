@@ -2,9 +2,11 @@
 # canary-report.sh <title> <findings-file> <run-url>
 # Keep one open issue (label "canary") per title in step with canary-findings.sh
 # output: any MATERIAL line opens the issue or replaces its body; none closes an
-# open one with a comment. LOG lines (a failed build's log) become one code block, fenced by more backticks than any line holds.
-# The body is cut to stay within GitHub's limit. Prints opened, updated, closed or
-# clean. An unreadable issue list fails the script, so it can never open a duplicate.
+# open one with a comment. LOG lines (a failed build's log) become one code block,
+# fenced by more backticks than any line holds. The findings are cut to stay within
+# GitHub's limit; a cut inside a code block closes it with its own fence, and the note
+# saying so follows outside it. Prints opened, updated, closed or clean. An unreadable
+# issue list fails the script, so it can never open a duplicate.
 # gh takes the repository from GH_REPO and the token from GH_TOKEN.
 set -euo pipefail
 
@@ -50,7 +52,39 @@ if grep -q '^MATERIAL: ' "$findings"; then
 	' "$findings")
 	limit=60000
 	if [[ ${#findings_md} -gt $limit ]]; then
-		findings_md="${findings_md:0:$limit}"$'\n```\n(cut: the full log is in the run\'s canary artifact)'
+		note="(cut: the full log is in the run's canary artifact)"
+		cut=$limit
+		while :; do
+			head=${findings_md:0:cut}
+			# the fence that closes a block still open where the text is cut, as CommonMark reads
+			# fences (up to three spaces, then three or more backticks or tildes; a backtick
+			# fence's info string holds none; it closes on a line of as many or more and blanks)
+			close=$(awk '
+				f == "" {
+					if (match($0, /^ ? ? ?(```+|~~~+)/)) {
+						f = substr($0, RSTART, RLENGTH)
+						sub(/^ +/, "", f)
+						c = substr(f, 1, 1)
+						n = length(f)
+						if (c == "`" && index(substr($0, RSTART + RLENGTH), "`")) f = ""
+					}
+					next
+				}
+				{
+					rest = $0
+					sub(/^ ? ? ?/, "", rest)
+					m = 0
+					while (substr(rest, m + 1, 1) == c) m++
+					if (m >= n && substr(rest, m + 1) ~ /^[ \t]*$/) f = ""
+				}
+				END { if (f != "") { s = ""; for (i = 0; i < n; i++) s = s c; print s } }
+			' <<<"$head")
+			((cut + ${#close} + ${#note} + 2 > limit)) || break
+			# the closing fence is long: cut earlier, so the whole still fits
+			cut=$((limit - ${#close} - ${#note} - 2))
+			((cut > 0)) || cut=0
+		done
+		findings_md=$head${close:+$'\n'$close}$'\n'$note
 	fi
 	body=$(printf '%s\n\n%s\n\nRun: %s\n' \
 		"The canary found what is published differing from what a build would produce now." \

@@ -51,6 +51,26 @@ expect_eq "packages.sh: PACKAGES_CONF changes nothing" \
 	"$(PACKAGES_CONF="$T/decoy-packages.conf" sh "$root/scripts/packages.sh" catalogue | tr '\n' ' ')" \
 	"$(sh "$root/scripts/packages.sh" catalogue | tr '\n' ' ')"
 
+# outside: on stdin markdown, out the lines a CommonMark renderer reads as markdown, outside every
+# fenced code block (an opening fence: up to three spaces, three or more backticks or tildes; the
+# closing one: as many or more of the same, nothing after but blanks); UNCLOSED if one never closes
+outside() {
+	awk '
+		f == "" && match($0, /^ ? ? ?(```+|~~~+)/) {
+			f = substr($0, RSTART, RLENGTH)
+			sub(/^ +/, "", f)
+			c = substr(f, 1, 1)
+			close_re = "^ ? ? ?"
+			for (i = 0; i < length(f); i++) close_re = close_re c
+			close_re = close_re c "*[ \t]*$"
+			next
+		}
+		f != "" { if ($0 ~ close_re) f = ""; next }
+		{ print }
+		END { if (f != "") print "UNCLOSED" }
+	'
+}
+
 conf() { printf '%s\n' "$@" >"$T/packages.conf"; }
 pk() { sh "$S/packages.sh" "$@"; }
 
@@ -1801,6 +1821,26 @@ expect_eq "report: a log line with backticks cannot close the block" \
 { echo "MATERIAL: build failed"; for i in $(seq 1 3000); do printf 'LOG: %050d\n' "$i"; done; } >"$T/findings"
 crep >/dev/null
 expect_eq "report: the body stays under GitHub's limit" "$(($(wc -c <"$STUB/issue_calls") < 65000))" "1"
+# a cut body closes the block it cuts, whatever the length of its fence, and the note stays outside it
+cutbody() { sed '1s/^create|[^|]*|//' "$STUB/issue_calls"; }
+cutnote="(cut: the full log is in the run's canary artifact)"
+: >"$STUB/issue_calls"
+{ echo "MATERIAL: build failed"; for i in $(seq 1 3000); do printf 'LOG: %050d ````` x\n' "$i"; done; } >"$T/findings"
+crep >/dev/null
+o=$(cutbody | outside)
+expect_eq "report: a cut inside a six-backtick block closes it, the note outside" \
+	"$(grep -c UNCLOSED <<<"$o") $(grep -cxF "$cutnote" <<<"$o")" "0 1"
+expect_eq "report: and stays under GitHub's limit" "$(($(cutbody | wc -c) < 65000))" "1"
+: >"$STUB/issue_calls"
+{
+	echo "MATERIAL: build failed"
+	printf 'LOG: a %s b\n' "$(head -c 61000 /dev/zero | tr '\0' '`')"
+	echo "LOG: ok"
+} >"$T/findings"
+crep >/dev/null
+o=$(cutbody | outside)
+expect_eq "report: a fence longer than the limit: the cut leaves the block out, the note outside" \
+	"$(grep -c UNCLOSED <<<"$o") $(grep -cxF "$cutnote" <<<"$o") $(($(cutbody | wc -c) < 65000))" "0 1 1"
 reset_stub
 printf 'MATERIAL: x\nNOTE: y\n' >"$T/findings"
 expect_eq "report: opens an issue" "$(crep)" "opened"
@@ -2301,25 +2341,6 @@ expect_fail "review-sums: usage" rs print os-alpha "$od"
 expect_fail "review-sums: an unknown command" rs sum os-alpha "$od" "$rv_"
 
 # --- summary.sh ---------------------------------------------------------------------------
-# outside: on stdin markdown, out the lines a CommonMark renderer reads as markdown, outside every
-# fenced code block (an opening fence: up to three spaces, three or more backticks or tildes; the
-# closing one: as many or more of the same, nothing after but blanks); UNCLOSED if one never closes
-outside() {
-	awk '
-		f == "" && match($0, /^ ? ? ?(```+|~~~+)/) {
-			f = substr($0, RSTART, RLENGTH)
-			sub(/^ +/, "", f)
-			c = substr(f, 1, 1)
-			close_re = "^ ? ? ?"
-			for (i = 0; i < length(f); i++) close_re = close_re c
-			close_re = close_re c "*[ \t]*$"
-			next
-		}
-		f != "" { if ($0 ~ close_re) f = ""; next }
-		{ print }
-		END { if (f != "") print "UNCLOSED" }
-	'
-}
 conf 'os-alpha   Org/plugins br-alpha net/alpha yes'
 reset_stub
 so="$T/so" sr="$T/sr"
