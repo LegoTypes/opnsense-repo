@@ -507,6 +507,248 @@ mkpkg "$T/b.pkg" "$(mod --arg f "$vf" '.files[$f] = {"sum":"1$v3","perm":"0644"}
 expect_eq "compare: a version file differing otherwise is" "$(cmpk)" $'file /usr/local/opnsense/version/alpha: content changed\nrc=1'
 expect_eq "compare: not a package" "$(bash "$root/scripts/compare-package.sh" "$T/repo.conf" "$T/a.pkg" 2>/dev/null; echo "rc=$?")" "rc=2"
 
+# --- verify-payload.sh -------------------------------------------------------------
+# A synthetic plugin, net/alpha at $commit, and (written out by hand, not derived) what
+# Mk/plugins.mk install makes of it: .in substituted, .shadow as .sample, both for .shadow.in,
+# man/ gzipped, modes kept, top-level dot files and symlinks left out, the version file added.
+umask 022 # the build VM's: staged files are 0644 or 0755
+vp="$T/vp"
+vs="$vp/net/alpha/src"
+vu="$vp/stage/usr/local"
+vhash=${commit:0:9}
+vsrc() {
+	rm -rf "$vp"
+	mkdir -p "$vs/opnsense/scripts/Alpha" "$vs/opnsense/mvc/app/views/Alpha" "$vs/etc/pkg/repos" "$vs/man/man8"
+	cat >"$vp/net/alpha/Makefile" <<'EOF'
+PLUGIN_NAME=		alpha
+PLUGIN_VERSION=		1.0
+PLUGIN_COMMENT=		Alpha
+PLUGIN_MAINTAINER=	maintainer@example.org
+PLUGIN_WWW=		https://example.org/alpha/
+
+.include "../../Mk/plugins.mk"
+EOF
+	printf '#!/usr/local/bin/python3\nprint("alpha")\n' >"$vs/opnsense/scripts/Alpha/run.py"
+	chmod 755 "$vs/opnsense/scripts/Alpha/run.py"
+	printf '<h1>alpha</h1>\n' >"$vs/opnsense/mvc/app/views/Alpha/index.volt"
+	: >"$vs/opnsense/.placeholder"
+	printf 'not installed\n' >"$vs/.hidden"
+	ln -s scripts "$vs/opnsense/link"
+	printf '%s\n' 'alpha %%PLUGIN_PKGVERSION%% %%PLUGIN_HASH%% %%PLUGIN_NAME%%%%PLUGIN_VARIANT%% %%PLUGIN_UNKNOWN%%' >"$vs/etc/alpha.conf.in"
+	printf 'shadowed\n' >"$vs/etc/alpha.conf.shadow"
+	printf '%s\n' 'url: %%PLUGIN_WWW%%' >"$vs/etc/pkg/repos/Alpha.conf.shadow.in"
+	printf '.Dd October 1, 2026\n.Nm alpha\n' >"$vs/man/man8/alpha.8"
+}
+vver() { # vver [<jq filter>]: the version file Templates/version renders for net/alpha
+	jq -n --arg h "$vhash" '{product_abi: "26.7", product_arch: "amd64", product_conflicts: "os-alpha-devel",
+		product_email: "maintainer@example.org", product_hash: $h, product_id: "os-alpha", product_name: "alpha",
+		product_tier: "3", product_version: "1.0", product_website: "https://example.org/alpha/"}' | jq "${1:-.}"
+}
+vstage() {
+	rm -rf "$vp/stage"
+	mkdir -p "$vu/opnsense/scripts/Alpha" "$vu/opnsense/mvc/app/views/Alpha" "$vu/etc/pkg/repos" "$vu/man/man8" "$vu/opnsense/version"
+	printf '#!/usr/local/bin/python3\nprint("alpha")\n' >"$vu/opnsense/scripts/Alpha/run.py"
+	chmod 755 "$vu/opnsense/scripts/Alpha/run.py"
+	printf '<h1>alpha</h1>\n' >"$vu/opnsense/mvc/app/views/Alpha/index.volt"
+	: >"$vu/opnsense/.placeholder"
+	printf 'alpha 1.0 %s alpha %%%%PLUGIN_UNKNOWN%%%%\n' "$vhash" >"$vu/etc/alpha.conf"
+	printf 'shadowed\n' >"$vu/etc/alpha.conf.sample"
+	printf 'url: https://example.org/alpha/\n' >"$vu/etc/pkg/repos/Alpha.conf.sample"
+	printf '.Dd October 1, 2026\n.Nm alpha\n' | gzip -n >"$vu/man/man8/alpha.8.gz"
+	vver >"$vu/opnsense/version/alpha"
+}
+vbase='{"name":"os-alpha","origin":"opnsense/os-alpha","version":"1.0","comment":"Alpha",
+ "maintainer":"maintainer@example.org","www":"https://example.org/alpha/","abi":"FreeBSD:15:amd64",
+ "arch":"freebsd:15:x86:64","prefix":"/usr/local","flatsize":1,"licenselogic":"single","licenses":["BSD2CLAUSE"],
+ "desc":"Alpha","categories":["net"],"scripts":{"pre-deinstall":"echo bye","post-install":"echo installed\nexit 0"}}'
+# vpkg [<jq arguments and filter>]: $vp/alpha.pkg from the stage, as pkg create writes one: zstd, absolute member
+# names (relative with VPKG_REL=1), owner VPKG_OWNER (default root:wheel); +MANIFEST lists each staged
+# file (1$ sha256, mode, owner) and annotates the version file, then the filter applies;
+# +COMPACT_MANIFEST is +MANIFEST without files and scripts unless VPKG_COMPACT gives a filter for it;
+# VPKG_TWICE names a staged file to archive a second time
+vpkg() {
+	local d="$vp/pkgroot" f perm files='{}' m own=${VPKG_OWNER:-root:wheel} t=()
+	rm -rf "$d"
+	mkdir -p "$d"
+	while IFS= read -r f; do
+		perm=0644
+		[[ -x $vp/stage/$f ]] && perm=0755
+		files=$(jq -c --arg p "/$f" --arg s "1\$$(sum "$vp/stage/$f")" --arg m "$perm" \
+			'.[$p] = {sum: $s, uname: "root", gname: "wheel", perm: $m, mtime: 1}' <<<"$files")
+	done < <(cd "$vp/stage" && find usr -type f | sort)
+	m=$(jq -c --argjson f "$files" --slurpfile v "$vu/opnsense/version/alpha" \
+		'.files = $f | .annotations = ($v[0] + {FreeBSD_version: "1500068"})' <<<"$vbase" | jq -c "${@:-.}")
+	printf '%s' "$m" >"$d/+MANIFEST"
+	jq -c "del(.files, .scripts) | ${VPKG_COMPACT:-.}" <<<"$m" >"$d/+COMPACT_MANIFEST"
+	if tar --version 2>/dev/null | grep -q bsdtar; then
+		t=(--uname "${own%:*}" --gname "${own#*:}" --uid 0 --gid 0)
+		[[ -n ${VPKG_REL:-} ]] || t+=(-P -s ',^usr/,/usr/,')
+	else
+		t=(--owner="${own%:*}:0" --group="${own#*:}:0")
+		[[ -n ${VPKG_REL:-} ]] || t+=(-P --transform 's,^usr/,/usr/,')
+	fi
+	mapfile -t f < <(cd "$vp/stage" && find usr -type f | sort)
+	[[ -z ${VPKG_TWICE:-} ]] || f+=("$VPKG_TWICE")
+	tar -cf - "${t[@]}" -C "$d" +COMPACT_MANIFEST +MANIFEST -C "$vp/stage" "${f[@]}" | zstd -q -c >"$vp/alpha.pkg"
+}
+vrun() { bash "$root/scripts/verify-payload.sh" "$vp/alpha.pkg" "$vp/net/alpha" os-alpha 1.0 FreeBSD:15:amd64 26.7 "$commit"; }
+vpass() { # vpass <name>: verify-payload.sh accepts the package
+	local out
+	if out=$(vrun 2>&1); then ok; else bad "$1: expected a pass, got [$out]"; fi
+}
+vfail() { # vfail <name> <reason>: verify-payload.sh refuses it with exactly that reason
+	local err
+	if err=$(vrun 2>&1 >/dev/null); then bad "$1: expected failure"; else expect_eq "$1" "$err" "verify-payload.sh: $2"; fi
+}
+vreset() { vsrc && vstage && vpkg; }
+volt=/usr/local/opnsense/mvc/app/views/Alpha/index.volt
+runpy=/usr/local/opnsense/scripts/Alpha/run.py
+
+vreset
+expect_eq "payload: identical, with .in, .shadow, .shadow.in and man/" "$(vrun 2>&1; echo "rc=$?")" \
+	$'payload: OK (8 files)\nscript post-install:\n\techo installed\n\texit 0\nscript pre-deinstall:\n\techo bye\nrc=0'
+VPKG_REL=1 vpkg
+vpass "payload: relative member names"
+vreset
+printf '<h1>beta</h1>\n' >"$vu/opnsense/mvc/app/views/Alpha/index.volt"
+vpkg
+vfail "payload: a modified file" "$volt differs from src/opnsense/mvc/app/views/Alpha/index.volt"
+vreset
+printf 'alpha 1.0 %s alpha %%%%PLUGIN_UNKNOWN%%%%\n' fedcba987 >"$vu/etc/alpha.conf"
+vpkg
+vfail "payload: an .in file substituted with other values" "/usr/local/etc/alpha.conf differs from src/etc/alpha.conf.in"
+vreset
+printf '.Dd October 1, 2026\n.Nm beta\n' | gzip -n >"$vu/man/man8/alpha.8.gz"
+vpkg
+vfail "payload: a modified man page" "/usr/local/man/man8/alpha.8.gz differs from src/man/man8/alpha.8"
+vreset
+printf '.Dd October 1, 2026\n.Nm alpha\n' >"$vu/man/man8/alpha.8.gz"
+vpkg
+vfail "payload: a man page not gzipped" "/usr/local/man/man8/alpha.8.gz is not gzip data"
+vreset
+printf '<?php\n' >"$vu/opnsense/extra.php"
+vpkg
+vfail "payload: an extra packaged file" "/usr/local/opnsense/extra.php is packaged but has no source"
+vreset
+printf '<?php\n' >"$vs/opnsense/new.php"
+vfail "payload: a source file missing from the package" "src/opnsense/new.php is not packaged (as /usr/local/opnsense/new.php)"
+vreset
+printf 'x\n' >"$vs/etc/alpha.conf"
+vfail "payload: two source files that install one path" "src/etc/alpha.conf and src/etc/alpha.conf.in both install /usr/local/etc/alpha.conf"
+vreset
+mkdir -p "$vs/opnsense/version"
+printf '{}\n' >"$vs/opnsense/version/alpha"
+vfail "payload: a source file in the version file's place" "src/opnsense/version/alpha would replace the version file"
+vreset
+printf 'x\n' >"$vs/opnsense/bad*name"
+vfail "payload: a source file name tar would read as a pattern" "src/opnsense/bad*name: unsupported file name"
+vreset
+chmod 644 "$vu/opnsense/scripts/Alpha/run.py"
+vpkg
+vfail "payload: an executable packaged without its exec bit" "$runpy: mode 0644 in +MANIFEST, expected 0755"
+vreset
+chmod 644 "$vu/opnsense/scripts/Alpha/run.py"
+vpkg --arg p "$runpy" '.files[$p].perm = "0755"'
+vfail "payload: the archive mode is what pkg installs" "$runpy: mode -rw-r--r-- in the archive, expected -rwxr-xr-x"
+vreset
+chmod 755 "$vu/opnsense/mvc/app/views/Alpha/index.volt"
+vpkg
+vfail "payload: a plain file packaged executable" "$volt: mode 0755 in +MANIFEST, expected 0644"
+vreset
+chmod 4755 "$vu/opnsense/scripts/Alpha/run.py"
+vpkg --arg p "$runpy" '.files[$p].perm = "4755"'
+vfail "payload: setuid in +MANIFEST" "$runpy: mode 4755 in +MANIFEST, expected 0755"
+vpkg
+vfail "payload: setuid in the archive" "$runpy: mode -rwsr-xr-x in the archive, expected -rwxr-xr-x"
+vreset
+vpkg --arg p "$runpy" '.files[$p].uname = "nobody"'
+vfail "payload: an owner other than root in +MANIFEST" "$runpy: owner nobody:wheel in +MANIFEST, expected root:wheel"
+VPKG_OWNER=nobody:wheel vpkg
+vfail "payload: an owner other than root in the archive" "/usr/local/etc/alpha.conf: owner nobody:wheel in the archive, expected root:wheel"
+vreset
+zero=$(printf '0%.0s' {1..64})
+vpkg --arg p "$volt" --arg s "1\$$zero" '.files[$p].sum = $s'
+vfail "payload: a +MANIFEST sum that does not match the content" "$volt: +MANIFEST sum does not match the content"
+b2='2$18tyyndkxmop9pmun9a8fz6awebt6wz9bbiathkzggib3p81uudj8tuij8qwpgofq449qmdcu6fumzuijx1uzkgkn4eab6o1o6fokub'
+vpkg --arg p "$volt" --arg s "$b2" '.files[$p].sum = $s'
+vpass "payload: a 2\$ sum (BLAKE2b, pkg's base32), as pkg 2 writes them"
+vpkg --arg p "$volt" --arg s "${b2/18ty/19ty}" '.files[$p].sum = $s'
+vfail "payload: a 2\$ sum that does not match" "$volt: +MANIFEST sum does not match the content"
+vpkg --arg p "$volt" '.files[$p].sum = "13$abc"'
+vfail "payload: a sum type it cannot check" "$volt: +MANIFEST sum type 13 is not supported"
+vreset
+vver '.product_hash = "fedcba987"' >"$vu/opnsense/version/alpha"
+vpkg
+vfail "payload: a version file with a foreign product_hash" "version file: product_hash is fedcba987, expected $vhash"
+vver '.product_version = "1.1"' >"$vu/opnsense/version/alpha"
+vpkg
+vfail "payload: a version file with the wrong product_version" "version file: product_version is 1.1, expected 1.0"
+vver '.product_id = "os-beta"' >"$vu/opnsense/version/alpha"
+vpkg
+vfail "payload: a version file with the wrong product_id" "version file: product_id is os-beta, expected os-alpha"
+vver '.product_abi = "27.1"' >"$vu/opnsense/version/alpha"
+vpkg '.annotations.product_abi = "26.7"'
+vfail "payload: a version file with the wrong product_abi" "version file: product_abi is 27.1, expected 26.7"
+vver '.product_extra = "x"' >"$vu/opnsense/version/alpha"
+vpkg
+vfail "payload: a version file with an eleventh key" "version file: not exactly the ten product_* strings"
+vver '.product_website = "https://example.org/?a&b"' >"$vu/opnsense/version/alpha"
+vpkg
+vfail "payload: a substitution value sed would not copy literally" "version file: product_website holds a character sed would not copy literally"
+vreset
+vpkg '.annotations.product_tier = "2"'
+vfail "payload: annotations that differ from the version file" "+MANIFEST annotations differ from the version file"
+vpkg --arg v /usr/local/opnsense/version/alpha 'del(.files[$v])'
+vfail "payload: no version file" "+MANIFEST lists no /usr/local/opnsense/version/alpha"
+vpkg '.name = "os-beta"'
+vfail "payload: the wrong name" "+MANIFEST name is os-beta, expected os-alpha"
+vpkg '.version = "1.1"'
+vfail "payload: the wrong version" "+MANIFEST version is 1.1, expected 1.0"
+vpkg '.abi = "FreeBSD:16:amd64"'
+vfail "payload: the wrong ABI" "+MANIFEST abi is FreeBSD:16:amd64, expected FreeBSD:15:amd64"
+vpkg '.annotations.product_abi = "27.1"'
+vfail "payload: the wrong series" "+MANIFEST product_abi is 27.1, expected 26.7"
+vpkg '.lua_scripts = {"post-install": ["print(1)"]}'
+vfail "payload: a manifest key it does not check" "+MANIFEST key lua_scripts is not expected"
+VPKG_COMPACT='.deps = {"php85-curl": {"origin": "ftp/php85-curl", "version": "8.5.0"}}' vpkg
+vfail "payload: a compact manifest that differs" "+COMPACT_MANIFEST differs from +MANIFEST"
+vpkg '.scripts["post-install"] = "echo \u001b[2Kinstalled"'
+vfail "payload: a script with control characters" "script post-install holds control characters"
+vpkg --arg p "$volt" 'del(.files[$p])'
+vfail "payload: a source file +MANIFEST does not list" "src/opnsense/mvc/app/views/Alpha/index.volt is not packaged (as $volt)"
+printf '<?php\n' >"$vu/opnsense/extra.php"
+vpkg 'del(.files["/usr/local/opnsense/extra.php"])'
+vfail "payload: an archive member +MANIFEST does not list" "archive member /usr/local/opnsense/extra.php is not in +MANIFEST"
+VPKG_TWICE=usr/local/opnsense/mvc/app/views/Alpha/index.volt vpkg
+vfail "payload: an archive member twice" "archive member $volt appears twice"
+vreset
+printf '<?php\n' >"$vs/opnsense/new.php"
+vpkg '.files["/usr/local/opnsense/new.php"] = {sum: "1$x", uname: "root", gname: "wheel", perm: "0644", mtime: 1}'
+vfail "payload: a +MANIFEST file the archive lacks" "/usr/local/opnsense/new.php is not in the archive"
+vreset
+vpkg '.deps = {"php85-curl": {"origin": "ftp/php85-curl", "version": "8.5.0"}}'
+vfail "payload: dependencies without PLUGIN_DEPENDS" "dependencies (php85-curl) differ from PLUGIN_DEPENDS (none)"
+printf 'PLUGIN_DEPENDS=\t\tphp85-curl \\\n\t\t\tphp85-xml\n' >>"$vp/net/alpha/Makefile"
+vfail "payload: PLUGIN_DEPENDS without the dependencies" "dependencies (php85-curl) differ from PLUGIN_DEPENDS (php85-curl php85-xml)"
+vpkg '.deps = {"php85-curl": {"origin": "ftp/php85-curl", "version": "8.5.0"}, "php85-xml": {"origin": "textproc/php85-xml", "version": "8.5.0"}}'
+vpass "payload: dependencies equal to PLUGIN_DEPENDS"
+vreset
+printf 'PLUGIN_VARIANTS=\tA B\n' >>"$vp/net/alpha/Makefile"
+vfail "payload: plugin variants" "Makefile: PLUGIN_VARIANT and PLUGIN_VARIANTS are not supported"
+vreset
+printf '.if defined(X)\nPLUGIN_DEPENDS=\tphp85-curl\n.endif\n' >>"$vp/net/alpha/Makefile"
+vfail "payload: a conditional Makefile" "Makefile: .if defined(X) is not supported"
+vreset
+mkdir -p "$vp/net/alpha/contrib"
+vfail "payload: contrib/" "contrib/ is not supported"
+vreset
+printf 'alpha \377 %%%%PLUGIN_NAME%%%%\n' >"$vs/etc/alpha.conf.in"
+vfail "payload: an .in file that is not UTF-8" "src/etc/alpha.conf.in: not UTF-8 text, cannot substitute"
+vreset
+expect_fail "payload: a commit that is not 40 hex digits" bash "$root/scripts/verify-payload.sh" "$vp/alpha.pkg" "$vp/net/alpha" os-alpha 1.0 FreeBSD:15:amd64 26.7 "$vhash"
+expect_fail "payload: usage" bash "$root/scripts/verify-payload.sh" "$vp/alpha.pkg"
+expect_fail "payload: not a package" bash "$root/scripts/verify-payload.sh" "$T/repo.conf" "$vp/net/alpha" os-alpha 1.0 FreeBSD:15:amd64 26.7 "$commit"
+
 # --- canary-findings.sh and canary-report.sh ----------------------------------------
 fd() { bash "$root/scripts/canary-findings.sh" os-alpha "$T/cf"; echo "rc=$?"; }
 cfdir() {
