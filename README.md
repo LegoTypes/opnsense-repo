@@ -33,6 +33,8 @@ The site serves the signed repository, its public key and `packages.txt`, and no
 
 **If the `sign` job fails** (a payload check, a release changed since approval), nothing was published: fix the cause and start a new publish. It reports "no package artifact: re-run the whole workflow" when the build's or the review's artifact is gone; use **Re-run all jobs**.
 
+**If the `review` job fails because OPNsense's PHP or Python changed since the build** (`provenance.sh` says upstream.sh "now says" another value), use **Re-run all jobs** or start a new publish: **Re-run failed jobs** runs only `review` again, against the old build, and fails again.
+
 **If a run fails after its deploy** (the catalogue went live but the `release` job did not create the release): use **Re-run failed jobs** on that run; its artifact still holds the deployed build. Never start a new publish for it: that would build it again, a different file under the same version. Until the release exists, every publish fails at carry-forward, which checks that the live catalogue serves exactly each package's newest release, so nothing is silently rolled back.
 
 A bad release is replaced by publishing a newer version: pkg never downgrades. Releases `publish-N` are the builds from before per-package publishing (all packages at once) and are kept as history.
