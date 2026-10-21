@@ -42,7 +42,10 @@ expect_eq "real file: catalogue" "$(sh "$root/scripts/packages.sh" catalogue | t
 	"os-wg-client-tunnels os-mac-alias-cache os-wan-failover os-unbound-upstream os-legotypes "
 
 # --- repo.sh -----------------------------------------------------------------
-rc() { printf '%s\n' "$@" >"$T/repo.conf"; }
+rc() {
+	printf '%s\n' "$@" >"$T/repo.conf"
+	printf '%s\n' "$@" | grep -q '^REQUIRE_IMMUTABLE_RELEASES=' || echo 'REQUIRE_IMMUTABLE_RELEASES=no' >>"$T/repo.conf"
+}
 rp() { REPO_CONF="$T/repo.conf" sh "$root/scripts/repo.sh" "$@"; }
 rc '# served repository' 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7 FreeBSD:15:amd64/27.1'
 expect_eq "repo abi" "$(rp abi)" "FreeBSD:15:amd64"
@@ -58,6 +61,16 @@ expect_eq "an ABI change keeps the old tree where firewalls on the old ABI look 
 expect_eq "an ABI change builds the new tree under the new ABI" "$(rp tree)" "site/FreeBSD:16:amd64/27.7/latest"
 rc 'ABI=FreeBSD:15:amd64' 'SERIES=27.1' 'SERVE=FreeBSD:15:amd64/26.7'
 expect_fail "SERVE must include the target" rp serve
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
+expect_eq "repo immutable: no" "$(rp immutable)" "no"
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7' 'REQUIRE_IMMUTABLE_RELEASES=yes'
+expect_eq "repo immutable: yes" "$(rp immutable)" "yes"
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7' 'REQUIRE_IMMUTABLE_RELEASES=maybe'
+expect_fail "repo immutable: neither yes nor no" rp immutable
+printf '%s\n' 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7' >"$T/repo.conf"
+expect_fail "repo immutable: unset" rp immutable
+expect_eq "the real repo.conf says no until every package has republished" \
+	"$(sh "$root/scripts/repo.sh" immutable)" "no"
 rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=26.7'
 expect_fail "a SERVE entry without its ABI" rp serve
 rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERIES=27.1' 'SERVE=FreeBSD:15:amd64/26.7'
@@ -240,6 +253,98 @@ expect_eq "series: the first publish into a new series succeeds with nothing els
 	"$(names "$(tree 27.1)" 2>/dev/null)" "* "
 expect_eq "series: the first publish keeps the old series whole" "$(names "$(tree 26.7)")" \
 	"os-alpha-1.1.pkg os-alpha-extra-2.0.pkg os-vendor-1.0.pkg "
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
+
+# --- manifest.sh and carry-forward's manifest ---------------------------------------
+# mf <built>: manifest.sh in $T/mo with the cf configuration
+C40=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+mf() {
+	rm -rf "$T/mo" && mkdir -p "$T/mo"
+	echo built >"$T/mo/$1-1.1.pkg"
+	PACKAGES_CONF="$T/packages.conf" REPO_CONF="$T/repo.conf" COMMIT=$C40 bash "$root/scripts/manifest.sh" "$1" "$T/mo"
+}
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
+reset_stub
+publish os-alpha-1.0 2026-01-01T00:00:00Z
+publish os-alpha-extra-2.0 2026-01-04T00:00:00Z
+publish os-vendor-1.0 2026-01-02T00:00:00Z
+mkdir -p "$STUB/immutable"
+touch "$STUB/immutable/os-vendor-1.0"
+rm -rf "$T/livesite"
+live os-alpha-1.0 os-alpha-extra-2.0 os-vendor-1.0
+mf os-alpha || bad "manifest.sh exited non-zero"
+M="$T/mo/manifest"
+alpha_extra_sum=$(sum "$STUB/assets/os-alpha-extra-2.0/os-alpha-extra-2.0.pkg")
+vendor_sum=$(sum "$STUB/assets/os-vendor-1.0/os-vendor-1.0.pkg")
+expect_eq "manifest: sorted lines, the carried releases with their immutability, the built package, the commit" \
+	"$(cat "$M")" "built os-alpha-1.1.pkg $(sum "$T/mo/os-alpha-1.1.pkg")
+carry FreeBSD:15:amd64/26.7 os-alpha-extra-2.0 $alpha_extra_sum immutable=no
+carry FreeBSD:15:amd64/26.7 os-vendor-1.0 $vendor_sum immutable=yes
+commit $C40"
+expect_eq "manifest: sorted" "$(LC_ALL=C sort "$M")" "$(cat "$M")"
+expect_eq "manifest: ends with a newline" "$(tail -c1 "$M" | od -An -c | tr -d ' ')" '\n'
+cfok os-alpha
+expect_eq "carry-forward writes the carry lines manifest.sh lists, in the working directory" \
+	"$(cat "$T/cfw/manifest.carry")" "$(grep '^carry ' "$M")"
+expect_eq "nothing but the trees appears under site/" "$(cd "$T/cfw" && find site -type f | grep -vc '/All/os-')" "0"
+expect_eq "no manifest file under site/" "$(cd "$T/cfw" && find site -iname '*manifest*' | wc -l | tr -d ' ')" "0"
+mfcf() { MANIFEST="$1" cf os-alpha; }
+mfcfok() { mfcf "$1" >/dev/null 2>&1 || bad "carry-forward against $1 exited non-zero"; }
+mfcfok "$M"
+cp "$M" "$T/m.shuffled"
+LC_ALL=C sort -r "$M" >"$T/m.shuffled"
+mfcfok "$T/m.shuffled"
+printf '%s' "$(cat "$M")" >"$T/m.nonl"
+mfcfok "$T/m.nonl"
+printf '%s' "$(grep '^carry ' "$M" | LC_ALL=C sort -r)" >"$T/m.carryonly"
+mfcfok "$T/m.carryonly"
+expect_eq "an empty approved carry list is not equal" "$(printf 'commit %s\n' "$C40" >"$T/m.none"; mfcf "$T/m.none" 2>&1 >/dev/null | grep -c 'differ from the approved manifest')" "1"
+sed "s/$vendor_sum/$(printf '0%.0s' {1..64})/" "$M" >"$T/m.sha"
+expect_fail "a changed sha256 fails" mfcf "$T/m.sha"
+expect_eq "a changed sha256 is reported as a difference" "$(mfcf "$T/m.sha" 2>&1 >/dev/null | grep -c 'differ from the approved manifest')" "1"
+sed 's/os-vendor-1.0 /os-vendor-0.9 /' "$M" >"$T/m.tag"
+expect_fail "a changed tag fails" mfcf "$T/m.tag"
+sed 's/immutable=yes/immutable=no/' "$M" >"$T/m.imm"
+expect_fail "a changed immutability fails" mfcf "$T/m.imm"
+grep -v 'os-vendor' "$M" >"$T/m.drop"
+expect_fail "a missing carry line fails" mfcf "$T/m.drop"
+expect_fail "an unreadable manifest fails" mfcf "$T/none"
+# a release changing between approval and signing: a newer one is published
+publish os-alpha-extra-2.1 2026-01-09T00:00:00Z
+live os-alpha-1.0 os-alpha-extra-2.1 os-vendor-1.0
+expect_fail "a newer release after the manifest was made fails" mfcf "$M"
+reset_stub
+publish os-alpha-1.0 2026-01-01T00:00:00Z
+publish os-alpha-extra-2.0 2026-01-04T00:00:00Z
+publish os-vendor-1.0 2026-01-02T00:00:00Z
+live os-alpha-1.0 os-alpha-extra-2.0 os-vendor-1.0
+mkdir -p "$STUB/immutable"
+# the live site unreachable: the existing message, not a mismatch
+echo 503 >"$T/livesite/FreeBSD:15:amd64/26.7/latest/packages.txt.status"
+out=$(MANIFEST="$M" cf os-alpha 2>&1 >/dev/null)
+expect_eq "Pages unreachable still reports the live site" "$(grep -c 'cannot read .* (HTTP 503)' <<<"$out")" "1"
+expect_eq "Pages unreachable is not a manifest mismatch" "$(grep -c 'differ' <<<"$out")" "0"
+expect_fail "manifest.sh with Pages unreachable" mf os-alpha
+rm "$T/livesite/FreeBSD:15:amd64/26.7/latest/packages.txt.status"
+# REQUIRE_IMMUTABLE_RELEASES
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7' 'REQUIRE_IMMUTABLE_RELEASES=yes'
+expect_fail "required immutable, newest release is not" cf os-alpha
+expect_eq "the die message names the release" "$(cf os-alpha 2>&1 >/dev/null | grep -c 'not immutable: os-alpha-extra-2.0 os-vendor-1.0')" "1"
+touch "$STUB/immutable/os-alpha-extra-2.0"
+expect_fail "required immutable, one of two is not" cf os-alpha
+touch "$STUB/immutable/os-vendor-1.0"
+cfok os-alpha
+expect_eq "required immutable, all are: carried" "$(names "$(tree)")" "os-alpha-extra-2.0.pkg os-vendor-1.0.pkg "
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
+rm "$STUB/immutable/os-vendor-1.0"
+cfok os-alpha
+expect_eq "not required: a release that is not immutable is carried and listed" \
+	"$(grep -c 'immutable=no' "$T/cfw/manifest.carry")" "1"
+# the manifest's inputs
+expect_fail "manifest.sh without the approved commit" env -u COMMIT bash "$root/scripts/manifest.sh" os-alpha "$T/mo"
+expect_fail "manifest.sh with a short commit" env COMMIT=abc123 bash "$root/scripts/manifest.sh" os-alpha "$T/mo"
+rm -f "$T/mo/os-alpha-1.1.pkg"
+expect_fail "manifest.sh without a built package" env PACKAGES_CONF="$T/packages.conf" REPO_CONF="$T/repo.conf" COMMIT=$C40 bash "$root/scripts/manifest.sh" os-alpha "$T/mo"
 rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 
 # --- newest-release.sh ----------------------------------------------------------

@@ -2,6 +2,7 @@
 # A stand-in for the gh calls scripts/ make. State lives in $STUB:
 #   releases.json        gh release list output
 #   notes/<tag>          release bodies (gh release view <tag> --json body --jq .body)
+#   immutable/<tag>      present: gh release view <tag> --json isImmutable says true (else false)
 #   assets/<tag>/<file>  release assets
 #   tags                 existing git tags, one per line
 #   fail_api             present: gh api fails
@@ -20,7 +21,12 @@ case "$1 $2" in
 		echo "release not found" >&2
 		exit 1
 	}
-	cat "$STUB/notes/$3"
+	case "$*" in
+	*"--json isImmutable"*)
+		[[ -e $STUB/immutable/$3 ]] && echo true || echo false
+		;;
+	*) cat "$STUB/notes/$3" ;;
+	esac
 	;;
 "release download")
 	tag=$3 pat='' dir=''

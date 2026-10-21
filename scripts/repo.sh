@@ -4,6 +4,8 @@
 #   repo.sh series         the series builds target, e.g. 26.7
 #   repo.sh target         the target tree, <ABI>/<series>
 #   repo.sh serve          the trees the site serves, <ABI>/<series>, one per line
+#   repo.sh immutable      yes or no: REQUIRE_IMMUTABLE_RELEASES, whether carrying
+#                          forward refuses a release that is not immutable
 #   repo.sh tree [entry]   site/<entry>/latest (default: the target; the entry must
 #                          be served)
 # A malformed file fails every command.
@@ -41,6 +43,14 @@ series() {
 
 target() { printf '%s/%s\n' "$(abi)" "$(series)"; }
 
+immutable() {
+	v=$(value REQUIRE_IMMUTABLE_RELEASES)
+	case $v in
+	yes | no) printf '%s\n' "$v" ;;
+	*) die "$conf: REQUIRE_IMMUTABLE_RELEASES must be yes or no, not $v" ;;
+	esac
+}
+
 serve() {
 	t=$(target)
 	list=$(value SERVE)
@@ -59,11 +69,12 @@ abi) abi ;;
 series) series ;;
 target) target ;;
 serve) serve ;;
+immutable) immutable ;;
 tree)
 	e=${2:-$(target)}
 	list=$(serve)
 	printf '%s\n' "$list" | grep -qxF "$e" || die "$e is not served"
 	printf 'site/%s/latest\n' "$e"
 	;;
-*) die "usage: repo.sh abi | series | target | serve | tree [entry]" ;;
+*) die "usage: repo.sh abi | series | target | serve | immutable | tree [entry]" ;;
 esac
