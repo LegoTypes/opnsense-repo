@@ -6,6 +6,10 @@
 #   repo.sh serve          the trees the site serves, <ABI>/<series>, one per line
 #   repo.sh immutable      yes or no: REQUIRE_IMMUTABLE_RELEASES, whether carrying
 #                          forward refuses a release that is not immutable
+#   repo.sh pkg-tool-commit  PKG_TOOL_COMMIT: the full freebsd/pkg commit
+#                          pkg-tool.sh builds pkg from
+#   repo.sh pkg-tool-sha256  PKG_TOOL_SHA256: the sha256 of GitHub's archive of
+#                          that commit, which pkg-tool.sh refuses to build without
 #   repo.sh tree [entry]   site/<entry>/latest (default: the target; the entry must
 #                          be served)
 # A malformed file fails every command.
@@ -51,6 +55,20 @@ immutable() {
 	esac
 }
 
+pkg_tool_commit() {
+	v=$(value PKG_TOOL_COMMIT)
+	printf '%s\n' "$v" | grep -Eqx '[0-9a-f]{40}' ||
+		die "$conf: PKG_TOOL_COMMIT must be a full commit (40 lower-case hex digits), not $v"
+	printf '%s\n' "$v"
+}
+
+pkg_tool_sha256() {
+	v=$(value PKG_TOOL_SHA256)
+	printf '%s\n' "$v" | grep -Eqx '[0-9a-f]{64}' ||
+		die "$conf: PKG_TOOL_SHA256 must be a sha256 (64 lower-case hex digits), not $v"
+	printf '%s\n' "$v"
+}
+
 serve() {
 	t=$(target)
 	list=$(value SERVE)
@@ -70,11 +88,13 @@ series) series ;;
 target) target ;;
 serve) serve ;;
 immutable) immutable ;;
+pkg-tool-commit) pkg_tool_commit ;;
+pkg-tool-sha256) pkg_tool_sha256 ;;
 tree)
 	e=${2:-$(target)}
 	list=$(serve)
 	printf '%s\n' "$list" | grep -qxF "$e" || die "$e is not served"
 	printf 'site/%s/latest\n' "$e"
 	;;
-*) die "usage: repo.sh abi | series | target | serve | immutable | tree [entry]" ;;
+*) die "usage: repo.sh abi | series | target | serve | immutable | pkg-tool-commit | pkg-tool-sha256 | tree [entry]" ;;
 esac

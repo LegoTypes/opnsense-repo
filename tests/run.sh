@@ -71,6 +71,25 @@ printf '%s\n' 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 expect_fail "repo immutable: unset" rp immutable
 expect_eq "the real repo.conf says no until every package has republished" \
 	"$(sh "$root/scripts/repo.sh" immutable)" "no"
+ptconf=('ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7')
+rc "${ptconf[@]}" "PKG_TOOL_COMMIT=$(printf 'a%.0s' {1..40})" "PKG_TOOL_SHA256=$(printf 'b%.0s' {1..64})"
+expect_eq "repo pkg-tool-commit" "$(rp pkg-tool-commit)" "$(printf 'a%.0s' {1..40})"
+expect_eq "repo pkg-tool-sha256" "$(rp pkg-tool-sha256)" "$(printf 'b%.0s' {1..64})"
+rc "${ptconf[@]}" 'PKG_TOOL_COMMIT=aaaaaaa' "PKG_TOOL_SHA256=$(printf 'b%.0s' {1..64})"
+expect_fail "repo pkg-tool-commit: an abbreviated commit" rp pkg-tool-commit
+rc "${ptconf[@]}" 'PKG_TOOL_COMMIT=2.8.4' "PKG_TOOL_SHA256=$(printf 'b%.0s' {1..64})"
+expect_fail "repo pkg-tool-commit: a tag, which can move" rp pkg-tool-commit
+rc "${ptconf[@]}" "PKG_TOOL_COMMIT=$(printf 'A%.0s' {1..40})" "PKG_TOOL_SHA256=$(printf 'b%.0s' {1..64})"
+expect_fail "repo pkg-tool-commit: upper case" rp pkg-tool-commit
+rc "${ptconf[@]}" "PKG_TOOL_COMMIT=$(printf 'a%.0s' {1..40})" "PKG_TOOL_SHA256=$(printf 'b%.0s' {1..63})"
+expect_fail "repo pkg-tool-sha256: 63 digits" rp pkg-tool-sha256
+rc "${ptconf[@]}" "PKG_TOOL_COMMIT=$(printf 'a%.0s' {1..40})" "PKG_TOOL_SHA256=$(printf 'B%.0s' {1..64})"
+expect_fail "repo pkg-tool-sha256: upper case" rp pkg-tool-sha256
+rc "${ptconf[@]}"
+expect_fail "repo pkg-tool-commit: unset" rp pkg-tool-commit
+expect_fail "repo pkg-tool-sha256: unset" rp pkg-tool-sha256
+expect_eq "the real repo.conf pins pkg's source" \
+	"$(sh "$root/scripts/repo.sh" pkg-tool-commit >/dev/null && sh "$root/scripts/repo.sh" pkg-tool-sha256 >/dev/null; echo "rc=$?")" "rc=0"
 rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=26.7'
 expect_fail "a SERVE entry without its ABI" rp serve
 rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERIES=27.1' 'SERVE=FreeBSD:15:amd64/26.7'
@@ -1163,6 +1182,40 @@ openssl dgst -sha256 -r "$T/data" | cut -d' ' -f1 | tr -d '\n' | openssl dgst -s
 openssl rsa -in "$T/other.pem" -pubout -out "$T/data.pub" 2>/dev/null
 tar -cf "$d/data.pkg" -C "$T" data data.sig data.pub
 expect_fail "verify: a catalogue carrying a key other than the published one" vc os-alpha
+
+# --- pkg-tool.sh (stub curl serves GitHub's archive) -----------------------------------
+# The archive of a fake commit: its configure records its arguments in $PT_CALLS and writes
+# a Makefile that "builds" src/pkg, a script printing a version.
+ptc=$(printf '1%.0s' {1..40})
+ptsrc="$T/ptsrc/pkg-$ptc"
+mkdir -p "$ptsrc" "$T/ptmirror"
+printf '%s\n' '#!/bin/sh' 'echo 2.8.4' >"$ptsrc/fake-pkg"
+printf '%s\n' '#!/bin/sh' 'printf "%s\n" configure "$@" >"$PT_CALLS"' \
+	'printf "all:\n\tmkdir -p src\n\tcp %s/fake-pkg src/pkg\n\tchmod 755 src/pkg\n" "$(cd "$(dirname "$0")" && pwd)" >Makefile' \
+	>"$ptsrc/configure"
+chmod 755 "$ptsrc/configure"
+tar -czf "$T/ptmirror/$ptc.tar.gz" -C "$T/ptsrc" "pkg-$ptc"
+pt() {
+	rm -rf "$T/ptdest" "$T/ptcalls"
+	PT_CALLS="$T/ptcalls" REPO_CONF="$T/repo.conf" STUB_MIRROR="$T/ptmirror" \
+		STUB_MIRROR_URL=https://github.com/freebsd/pkg/archive bash "$root/scripts/pkg-tool.sh" "$@"
+}
+rc "${ptconf[@]}" "PKG_TOOL_COMMIT=$ptc" "PKG_TOOL_SHA256=$(sum "$T/ptmirror/$ptc.tar.gz")"
+expect_eq "pkg-tool: prints the installed pkg" "$(pt "$T/ptdest" 2>/dev/null)" "$T/ptdest/sbin/pkg"
+expect_eq "pkg-tool: configured for the destination" "$(sed -n 2p "$T/ptcalls" 2>/dev/null)" "--prefix=$T/ptdest"
+expect_eq "pkg-tool: the installed pkg runs" "$("$T/ptdest/sbin/pkg" -v 2>/dev/null)" "2.8.4"
+rc "${ptconf[@]}" "PKG_TOOL_COMMIT=$ptc" "PKG_TOOL_SHA256=$(printf '0%.0s' {1..64})"
+err=$(pt "$T/ptdest" 2>&1 >/dev/null)
+expect_eq "pkg-tool: a wrong sha256 fails" "$?" "1"
+expect_eq "pkg-tool: a wrong sha256 is named" \
+	"$(grep -c "sha256 $(sum "$T/ptmirror/$ptc.tar.gz"), not the pinned $(printf '0%.0s' {1..64})" <<<"$err")" "1"
+expect_eq "pkg-tool: a wrong sha256 dies before configure runs" "$([[ -e $T/ptcalls ]] && echo ran)" ""
+expect_eq "pkg-tool: a wrong sha256 installs nothing" "$([[ -e $T/ptdest/sbin/pkg ]] && echo installed)" ""
+rc "${ptconf[@]}" "PKG_TOOL_COMMIT=$(printf '2%.0s' {1..40})" "PKG_TOOL_SHA256=$(sum "$T/ptmirror/$ptc.tar.gz")"
+expect_fail "pkg-tool: a commit GitHub does not serve" pt "$T/ptdest"
+rc "${ptconf[@]}" "PKG_TOOL_COMMIT=$ptc"
+expect_fail "pkg-tool: no pinned sha256" pt "$T/ptdest"
+expect_fail "pkg-tool: usage" pt
 
 echo "passed $pass, failed $failed"
 [[ $failed -eq 0 ]]
