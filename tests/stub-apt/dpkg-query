@@ -1,0 +1,7 @@
+#!/bin/sh
+# A stand-in for dpkg-query -W -f <format> <package...> in pkg-tool.sh's tests: names
+# each package with a fake version.
+shift 3
+for p in "$@"; do
+	echo "$p 0-stub"
+done

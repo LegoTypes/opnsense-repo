@@ -1,13 +1,18 @@
 #!/bin/sh
-# A stand-in for the pkg calls sign-catalogue.sh makes in the VM.
+# A stand-in for the pkg calls sign-catalogue.sh makes (pkg-tool.sh's pkg on the runner).
 #   pkg repo <dir> signing_command: <cmd...>
 #     speaks pkg's signing_command protocol: for data and packagesite.yaml it
 #     feeds the file's sha256 (hex) to <cmd>, takes the bytes between
 #     "SIGNATURE" and "CERT" as the signature and those between "CERT" and
 #     "END" as the public key, and packs file, .sig and .pub into <name>.pkg
-#     (data.pkg, packagesite.pkg), as pkg repo does
+#     (data.pkg, packagesite.pkg), a tar archive compressed with zstd, as pkg repo does
 #   pkg info -F <file>   prints three lines naming the file
+# With STUB_PKG_REFUSE set it runs nothing and fails (a test's proof that another pkg ran).
 set -eu
+if [ -n "${STUB_PKG_REFUSE:-}" ]; then
+	echo "stub pkg: refused (STUB_PKG_REFUSE is set)" >&2
+	exit 2
+fi
 case "$1 $2" in
 "repo "*)
 	dir=$2
@@ -24,7 +29,7 @@ case "$1 $2" in
 		' "$work/reply"
 		mv "$work/sig" "$work/$file.sig"
 		mv "$work/pub" "$work/$file.pub"
-		tar -cf "$dir/$archive.pkg" -C "$work" "$file.sig" "$file.pub" "$file"
+		tar -cf - -C "$work" "$file.sig" "$file.pub" "$file" | zstd -q -c >"$dir/$archive.pkg"
 		rm -rf "$work"
 	done
 	echo 'version = 2;' >"$dir/meta.conf"

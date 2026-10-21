@@ -1,0 +1,3 @@
+#!/bin/sh
+# A stand-in for apt-get in pkg-tool.sh's tests (its Linux branch): installs nothing.
+exit 0

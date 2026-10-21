@@ -483,6 +483,7 @@ conf 'os-alpha      Org/plugins br   net/alpha        yes' \
 	'os-beta       Org/plugins br   net/beta         no' \
 	'os-legotypes  .           main vendor/legotypes yes'
 R="site/FreeBSD:15:amd64/26.7/latest"
+openssl rsa -in "$T/other.pem" -pubout -out "$T/other.pub" 2>/dev/null
 # signdir <carried file...>: out/ holds the built os-legotypes, All/ the carried files
 signdir() {
 	vmdir
@@ -493,60 +494,131 @@ signdir() {
 	local f
 	for f in "$@"; do echo "carried" >"$W/$R/All/$f"; done
 }
+# sg [VAR=value...]: sign-catalogue.sh as the sign job runs it, with the workflow run's id
+run_id=4815162342
+sg() { vmenv "GITHUB_RUN_ID=$run_id" "$@" -- sign-catalogue.sh; }
+# stamped <tree dir> <public key>: yes if the tree's stamp verifies with the key as os-legotypes
+# checks it (the signature over the stamp's sha256 hex, as pkg signs a catalogue file), else no
+stamped() {
+	if openssl dgst -sha256 -r "$1/stamp" | cut -d' ' -f1 | tr -d '\n' |
+		openssl dgst -sha256 -verify "$2" -signature "$1/stamp.sig" >/dev/null 2>&1; then
+		echo yes
+	else
+		echo no
+	fi
+}
+# fields <stamp>: the stamp with its date replaced by <UTC> if it is a UTC ISO-8601 time
+fields() {
+	sed 's/^published: [0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}Z$/published: <UTC>/' "$1"
+}
+exists() { if [[ -e $1 ]]; then echo yes; else echo no; fi; }
+# norun <command...>: the command with GITHUB_RUN_ID unset (a workflow run sets it)
+norun() { (
+	unset GITHUB_RUN_ID
+	"$@"
+); }
 signdir os-alpha-1.1.pkg
-vm sign-catalogue.sh >/dev/null
+sg >/dev/null
 expect_eq "sign: catalogue written" "$(cat "$W/$R/meta.conf")" "version = 2;"
-tar -xf "$W/$R/data.pkg" -C "$T" data.sig
+bsdtar -xf "$W/$R/data.pkg" -C "$T" data.sig
 expect_eq "sign: signature not empty" "$([[ -s $T/data.sig ]] && echo yes)" "yes"
-expect_eq "sign: bootstrap package" "$(cat "$W/site/os-legotypes.pkg")" "built"
+expect_eq "sign: the site root serves no bootstrap package" "$(exists "$W/site/os-legotypes.pkg")" "no"
 expect_eq "sign: public key published" "$(cat "$W/site/legotypes-pkg-signing.pub")" "$(cat "$T/pub.pem")"
 expect_eq "sign: packages.txt names both" "$(grep '^Name' "$W/site/packages.txt" | tr '\n' ' ')" \
 	"Name : os-alpha-1.1 Name : os-legotypes-1.0_2 "
 expect_eq "sign: the tree has its own packages.txt" "$(cat "$W/$R/packages.txt")" "$(cat "$W/site/packages.txt")"
 expect_eq "sign: key removed" "$(names "$W/.signing")" "* "
+expect_eq "sign: the stamp names the time, the run and the tree" "$(fields "$W/$R/stamp")" \
+	$'published: <UTC>\nrun: 4815162342\ntree: FreeBSD:15:amd64/26.7'
+expect_eq "sign: the stamp's key is the published key" "$(cat "$W/$R/stamp.pub")" "$(cat "$T/pub.pem")"
+expect_eq "sign: the stamp verifies with the published key" "$(stamped "$W/$R" "$T/pub.pem")" "yes"
+expect_eq "sign: the stamp does not verify with another key" "$(stamped "$W/$R" "$T/other.pub")" "no"
+mkdir -p "$T/forged"
+cp "$W/$R/stamp.sig" "$T/forged/"
+sed 's/^published: .*/published: 2099-01-01T00:00:00Z/' "$W/$R/stamp" >"$T/forged/stamp"
+expect_eq "sign: a stamp given another date does not verify" "$(stamped "$T/forged" "$T/pub.pem")" "no"
 signdir os-alpha-1.1.pkg os-beta-9.0.pkg
-expect_fail "sign: a release-only package in the catalogue" vm sign-catalogue.sh
+expect_fail "sign: a release-only package in the catalogue" sg
 expect_eq "sign: key removed after a failure" "$(names "$W/.signing")" "* "
 signdir
-expect_fail "sign: a catalogue package missing" vm sign-catalogue.sh
+expect_fail "sign: a catalogue package missing" sg
 signdir os-alpha-1.1.pkg os-alpha-1.0.pkg
-expect_fail "sign: two versions of one package" vm sign-catalogue.sh
+expect_fail "sign: two versions of one package" sg
 signdir os-alpha-1.1.pkg
 rm "$W/.signing/key"
-expect_fail "sign: no key" vm sign-catalogue.sh
+expect_fail "sign: no key" sg
 signdir os-alpha-1.1.pkg
 echo >"$W/.signing/key"
-expect_fail "sign: an empty key (the secret did not arrive)" vm sign-catalogue.sh
-expect_eq "sign: nothing published after a failed signing" "$([[ -e $W/site/os-legotypes.pkg ]] && echo yes || echo no)" "no"
+expect_fail "sign: an empty key (the secret did not arrive)" sg
+expect_eq "sign: nothing published after a failed signing" \
+	"$(exists "$W/site/legotypes-pkg-signing.pub") $(exists "$W/$R/stamp")" "no no"
 signdir os-alpha-1.1.pkg
 cp "$T/other.pem" "$W/.signing/key"
-expect_fail "sign: a key the published public key does not match" vm sign-catalogue.sh
+expect_fail "sign: a key the published public key does not match" sg
 expect_eq "sign: key removed after a mismatch" "$(names "$W/.signing")" "* "
+expect_eq "sign: no stamp after a mismatch" "$(exists "$W/$R/stamp")" "no"
 signdir os-alpha-1.1.pkg
-openssl rsa -in "$T/other.pem" -pubout -out "$T/other.pub" 2>/dev/null
 trust "$T/other.pub"
-expect_fail "sign: a key os-legotypes does not trust (a half-done rotation)" vm sign-catalogue.sh
-expect_eq "sign: nothing published for an untrusted key" "$([[ -e $W/site/os-legotypes.pkg ]] && echo yes || echo no)" "no"
+expect_fail "sign: a key os-legotypes does not trust (a half-done rotation)" sg
+expect_eq "sign: nothing published for an untrusted key" \
+	"$(exists "$W/site/legotypes-pkg-signing.pub") $(exists "$W/$R/meta.conf") $(exists "$W/$R/stamp")" "no no no"
+# the run id: required and a number, checked before anything is signed
+signdir os-alpha-1.1.pkg
+expect_fail "sign: GITHUB_RUN_ID unset" norun vm sign-catalogue.sh
+expect_eq "sign: nothing signed without a run id" "$(exists "$W/$R/meta.conf") $(exists "$W/$R/stamp")" "no no"
+expect_eq "sign: key removed without a run id" "$(names "$W/.signing")" "* "
+signdir os-alpha-1.1.pkg
+expect_fail "sign: GITHUB_RUN_ID empty" vmenv GITHUB_RUN_ID= -- sign-catalogue.sh
+expect_eq "sign: nothing signed with an empty run id" "$(exists "$W/$R/meta.conf")" "no"
+signdir os-alpha-1.1.pkg
+expect_fail "sign: a run id that is not a number cannot add a line to the stamp" \
+	vmenv $'GITHUB_RUN_ID=1\ntree: FreeBSD:15:amd64/26.1' -- sign-catalogue.sh
+expect_eq "sign: nothing signed with a malformed run id" "$(exists "$W/$R/meta.conf")" "no"
+# PKG=: the pkg the sign job built (pkg-tool.sh); the stub on PATH refuses to run while STUB_PKG_REFUSE is set
+mkdir -p "$T/pkgtool/sbin"
+# shellcheck disable=SC2016 # $1 and $@ belong to the wrapper
+printf '#!/bin/sh\necho "$1" >>"%s"\nSTUB_PKG_REFUSE= exec "%s" "$@"\n' "$T/pkgtool/calls" "$root/tests/stub-vm/pkg" \
+	>"$T/pkgtool/sbin/pkg"
+chmod +x "$T/pkgtool/sbin/pkg"
+signdir os-alpha-1.1.pkg
+rm -f "$T/pkgtool/calls"
+expect_fail "sign: the stub pkg on PATH refuses while STUB_PKG_REFUSE is set" sg STUB_PKG_REFUSE=1
+signdir os-alpha-1.1.pkg
+rm -f "$T/pkgtool/calls"
+sg "PKG=$T/pkgtool/sbin/pkg" STUB_PKG_REFUSE=1 >/dev/null
+expect_eq "sign: PKG= is the pkg that signs and lists the catalogue" "$(sort -u "$T/pkgtool/calls" | tr '\n' ' ')" "info repo "
+expect_eq "sign: signed with PKG=" "$(stamped "$W/$R" "$T/pub.pem") $(cat "$W/$R/meta.conf")" "yes version = 2;"
+signdir os-alpha-1.1.pkg
+expect_fail "sign: a PKG= that is not there" sg "PKG=$T/pkgtool/sbin/none"
+cp "$T/pkgtool/sbin/pkg" "$T/pkgtool/sbin/pkg.noexec"
+chmod 644 "$T/pkgtool/sbin/pkg.noexec"
+expect_fail "sign: a PKG= that is not executable" sg "PKG=$T/pkgtool/sbin/pkg.noexec"
+expect_eq "sign: nothing signed without a pkg" "$(exists "$W/$R/meta.conf") $(names "$W/.signing")" "no * "
 signdir os-alpha-1.1.pkg
 printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=FreeBSD:15:amd64/26.1 FreeBSD:15:amd64/26.7\n' >"$W/repo.conf"
 mkdir -p "$W/site/FreeBSD:15:amd64/26.1/latest/All"
 echo "old" >"$W/site/FreeBSD:15:amd64/26.1/latest/All/os-alpha-1.0.pkg"
-vm sign-catalogue.sh >/dev/null
+sg >/dev/null
 expect_eq "sign: a frozen tree is signed too" "$(cat "$W/site/FreeBSD:15:amd64/26.1/latest/meta.conf" 2>/dev/null)" "version = 2;"
 expect_eq "sign: a frozen tree may lack a package" "$(grep -c '^Name' "$W/site/FreeBSD:15:amd64/26.1/latest/packages.txt" 2>/dev/null)" "1"
+expect_eq "sign: a frozen tree has its own stamp" "$(fields "$W/site/FreeBSD:15:amd64/26.1/latest/stamp" 2>/dev/null)" \
+	$'published: <UTC>\nrun: 4815162342\ntree: FreeBSD:15:amd64/26.1'
+expect_eq "sign: the frozen tree's stamp verifies" "$(stamped "$W/site/FreeBSD:15:amd64/26.1/latest" "$T/pub.pem")" "yes"
+expect_eq "sign: one publication time for every tree" "$(sed -n 1p "$W/$R/stamp")" \
+	"$(sed -n 1p "$W/site/FreeBSD:15:amd64/26.1/latest/stamp" 2>/dev/null)"
 signdir
 printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=FreeBSD:15:amd64/26.1 FreeBSD:15:amd64/26.7\n' >"$W/repo.conf"
 mkdir -p "$W/site/FreeBSD:15:amd64/26.1/latest/All"
 echo "old" >"$W/site/FreeBSD:15:amd64/26.1/latest/All/os-alpha-1.0.pkg"
 expect_eq "sign: the first publish into a new series signs a target tree holding only the built package" \
-	"$(vm sign-catalogue.sh >/dev/null 2>&1; echo "rc=$?")" "rc=0"
+	"$(sg >/dev/null 2>&1; echo "rc=$?")" "rc=0"
 signdir
-expect_fail "sign: with one series served, every catalogue package is still required" vm sign-catalogue.sh
+expect_fail "sign: with one series served, every catalogue package is still required" sg
 signdir os-alpha-1.1.pkg
 printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=FreeBSD:15:amd64/26.1 FreeBSD:15:amd64/26.7\n' >"$W/repo.conf"
 mkdir -p "$W/site/FreeBSD:15:amd64/26.1/latest/All"
 echo "old" >"$W/site/FreeBSD:15:amd64/26.1/latest/All/os-alpha-1.0.pkg"
-vm sign-catalogue.sh >/dev/null
+sg >/dev/null
 expect_eq "sign: the root keeps the target tree" "$(grep '^Name' "$W/site/packages.txt" | tr '\n' ' ')" \
 	"Name : os-alpha-1.1 Name : os-legotypes-1.0_2 "
 
@@ -1195,9 +1267,11 @@ printf '%s\n' '#!/bin/sh' 'printf "%s\n" configure "$@" >"$PT_CALLS"' \
 	>"$ptsrc/configure"
 chmod 755 "$ptsrc/configure"
 tar -czf "$T/ptmirror/$ptc.tar.gz" -C "$T/ptsrc" "pkg-$ptc"
+# On Linux pkg-tool.sh installs its build dependencies: tests/stub-apt's sudo, apt-get and
+# dpkg-query stand in for them
 pt() {
 	rm -rf "$T/ptdest" "$T/ptcalls"
-	PT_CALLS="$T/ptcalls" REPO_CONF="$T/repo.conf" STUB_MIRROR="$T/ptmirror" \
+	PATH="$root/tests/stub-apt:$PATH" PT_CALLS="$T/ptcalls" REPO_CONF="$T/repo.conf" STUB_MIRROR="$T/ptmirror" \
 		STUB_MIRROR_URL=https://github.com/freebsd/pkg/archive bash "$root/scripts/pkg-tool.sh" "$@"
 }
 rc "${ptconf[@]}" "PKG_TOOL_COMMIT=$ptc" "PKG_TOOL_SHA256=$(sum "$T/ptmirror/$ptc.tar.gz")"
