@@ -12,6 +12,12 @@ installed from it stay installed until removed.
 Plugin Changelog
 ================
 
+1.2
+
+* configctl legotypes check: shows when the catalogue was last published,
+  verified by its signature; a missing or unverifiable signature is a
+  mismatch, a site that cannot be reached is not
+
 1.1
 
 * configctl legotypes check: do the LegoTypes packages fit this firewall
