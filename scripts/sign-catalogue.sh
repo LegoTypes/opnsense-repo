@@ -22,10 +22,13 @@
 #
 # Environment: GITHUB_RUN_ID, required (the workflow run's id, digits only); PKG, the
 # pkg to run, by default pkg on PATH: the sign job passes the one scripts/pkg-tool.sh
-# built (pkg repo needs no FreeBSD host). Runs under dash (Ubuntu's /bin/sh) and macOS's
-# sh, with GNU or BSD tools, and needs openssl and bsdtar reading zstd, as pkg packs both
-# archives: on the runner the libarchive-tools and zstd packages from Ubuntu's archive,
-# nothing from /usr/local.
+# built (pkg repo needs no FreeBSD host). PKG is resolved to an absolute path, and then
+# everything runs with PATH=/usr/bin:/bin, so no openssl, bsdtar or other tool from
+# /usr/local (first on the runner's PATH) or anywhere else touches the key or checks the
+# result. Runs under dash (Ubuntu's /bin/sh) and macOS's sh, with GNU or BSD tools, and
+# needs /usr/bin/openssl and /usr/bin/bsdtar reading zstd, as pkg packs both archives:
+# on the runner the libarchive-tools and zstd packages from Ubuntu's archive (macOS's
+# bsdtar reads no zstd, so on a Mac only the tests run it).
 set -eu
 
 PUB=keys/legotypes-pkg-signing.pub
@@ -37,11 +40,27 @@ die() {
 	exit 1
 }
 
-# the staged key and everything derived from it, removed on exit, whatever happens
+# the staged key and everything derived from it, removed on exit, whatever happens: a
+# signal (a cancelled job) exits through the EXIT trap, which dash skips on a signal
+# that is not trapped
 unstage() {
-	rm -f .signing/key .signing/sign.sh .signing/sig .signing/reply .signing/trailer
+	/bin/rm -f .signing/key .signing/sign.sh .signing/sig
 }
 trap unstage EXIT
+trap 'exit 1' HUP INT TERM
+
+# pkg is the one tool taken from PATH (or PKG=): an absolute path, an executable file
+case $PKG in
+*/*) ;;
+*) PKG=$(command -v "$PKG") || die "no pkg on PATH" ;;
+esac
+case $PKG in
+/*) ;;
+*) PKG=$(pwd)/$PKG ;;
+esac
+[ -f "$PKG" ] && [ -x "$PKG" ] || die "no pkg to run: $PKG"
+PATH=/usr/bin:/bin
+export PATH
 
 run=${GITHUB_RUN_ID:-}
 # digits only: the stamp is read line by line, so the value must not add a line
@@ -49,11 +68,6 @@ case $run in
 '' | *[!0-9]*) die "GITHUB_RUN_ID must be the workflow run's id, not \"$run\"" ;;
 esac
 published=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-# a path must be an executable file (dash's command -v accepts any existing one)
-case $PKG in
-*/*) [ -f "$PKG" ] && [ -x "$PKG" ] ;;
-*) command -v "$PKG" >/dev/null ;;
-esac || die "no pkg to run: $PKG"
 target=$(sh scripts/repo.sh target)
 R=$(sh scripts/repo.sh tree)
 served=$(sh scripts/repo.sh serve)
@@ -74,12 +88,15 @@ catalogue=$(sh scripts/packages.sh catalogue)
 # signing_command mode (pkg-repo(8)): pkg feeds the sha256 (hex) of each catalogue
 # file, and a newline, to the command and stores the signature and the public key
 # beside it, so clients check the key's sha256 against their trusted fingerprints
-# (signature_type "fingerprints"). The command stops before answering if openssl
-# produced no signature. pkg writes the line and then waits for the answer, so a
-# plain read returns at once (POSIX sh has no read timeout; dash refuses "read -t").
-# The lines are the literal text of the signing script: $sum expands when it runs.
+# (signature_type "fingerprints"). The command signs only a sha256 digest: a line of
+# exactly 64 lowercase hex digits, read whole (IFS= keeps any blank around it), or it
+# exits non-zero with no answer; it stops before answering if openssl produced no
+# signature. pkg writes the line and then waits for the answer, so a plain read returns
+# at once (POSIX sh has no read timeout; dash refuses "read -t"). The lines are the
+# literal text of the signing script: $sum expands when it runs, not here.
 # shellcheck disable=SC2016
-printf '%s\n' '#!/bin/sh' 'set -e' 'read -r sum' '[ -n "$sum" ]' \
+printf '%s\n' '#!/bin/sh' 'set -e' 'IFS= read -r sum' \
+	'case $sum in *[!0123456789abcdef]*) exit 1 ;; esac' '[ "${#sum}" -eq 64 ] || exit 1' \
 	'printf %s "$sum" | /usr/bin/openssl dgst -sign .signing/key -sha256 -binary >.signing/sig' \
 	'[ -s .signing/sig ]' 'echo SIGNATURE' 'cat .signing/sig' 'echo' \
 	'echo CERT' "cat $PUB" 'echo END' >.signing/sign.sh
@@ -92,25 +109,13 @@ verify() {
 }
 
 # stamp <tree dir> <ABI/series>: write the tree's stamp, have the signing command sign
-# it as pkg has it sign a catalogue file, and check it as os-legotypes will
+# it as pkg has it sign a catalogue file, and check it as os-legotypes will. The
+# signature is .signing/sig, the bytes the command answers between SIGNATURE and CERT.
 stamp() {
 	printf 'published: %s\nrun: %s\ntree: %s\n' "$published" "$run" "$2" >"$1/stamp"
-	openssl dgst -sha256 -r "$1/stamp" | cut -d' ' -f1 | /bin/sh .signing/sign.sh >.signing/reply ||
+	openssl dgst -sha256 -r "$1/stamp" | cut -d' ' -f1 | /bin/sh .signing/sign.sh >/dev/null ||
 		die "the signing command failed for $1/stamp"
-	# the answer is "SIGNATURE\n", the signature, then "\nCERT\n<key>END\n", which
-	# must hold exactly the published key
-	{
-		printf '\nCERT\n'
-		cat "$PUB"
-		printf 'END\n'
-	} >.signing/trailer
-	size=$(wc -c <.signing/reply | tr -d ' ')
-	trailer=$(wc -c <.signing/trailer | tr -d ' ')
-	siglen=$((size - 10 - trailer))
-	{ [ "$siglen" -gt 0 ] && [ "$(head -c 10 .signing/reply)" = SIGNATURE ] &&
-		tail -c "$trailer" .signing/reply | cmp -s - .signing/trailer; } ||
-		die "the signing command's answer for $1/stamp is not SIGNATURE, a signature, CERT, $PUB, END"
-	tail -c +11 .signing/reply | head -c "$siglen" >"$1/stamp.sig"
+	cp .signing/sig "$1/stamp.sig"
 	cp "$PUB" "$1/stamp.pub"
 	verify "$1/stamp" "$1/stamp.sig" "$1/stamp.pub" ||
 		die "the signature of $1/stamp does not verify with $PUB"

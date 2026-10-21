@@ -413,7 +413,8 @@ trust() {
 	printf 'function: "sha256"\nfingerprint: "%s"\n' "$(sum "$1")" \
 		>"$W/vendor/legotypes/src/etc/pkg/fingerprints/LegoTypes/trusted/test.1"
 }
-vm() { (cd "$W" && PATH="$root/tests/stub-vm:$PATH" sh "scripts/$1" "${@:2}"); }
+# (STUB_PATH: the PATH the stub pkg runs with, sign-catalogue.sh running it with /usr/bin:/bin)
+vm() { (cd "$W" && STUB_PATH="${STUB_PATH:-$PATH}" PATH="$root/tests/stub-vm:$PATH" sh "scripts/$1" "${@:2}"); }
 # vmenv VAR=value... -- <script> <args>: vm with those variables exported
 vmenv() {
 	local a=()
@@ -537,6 +538,57 @@ mkdir -p "$T/forged"
 cp "$W/$R/stamp.sig" "$T/forged/"
 sed 's/^published: .*/published: 2099-01-01T00:00:00Z/' "$W/$R/stamp" >"$T/forged/stamp"
 expect_eq "sign: a stamp given another date does not verify" "$(stamped "$T/forged" "$T/pub.pem")" "no"
+printf 'published: %s\nrun: %s\ntree: %s\n' "$(sed -n 's/^published: //p' "$W/$R/stamp")" "$run_id" \
+	FreeBSD:15:amd64/26.7 >"$T/stamp.expected"
+expect_eq "sign: the stamp is exactly three LF-terminated lines" \
+	"$(cmp -s "$W/$R/stamp" "$T/stamp.expected" && echo same) $(wc -l <"$W/$R/stamp" | tr -d ' ')" "same 3"
+# nothing published holds the private key, inside the catalogue archives either, and
+# .signing/ is left empty, dot files included
+expect_eq "sign: no file under site/ holds a private key" "$(grep -rl 'PRIVATE KEY' "$W/site" "$W/out")" ""
+expect_eq "sign: no catalogue archive holds a private key" \
+	"$(for a in "$W/$R"/*.pkg; do bsdtar -xOf "$a"; done | grep -c 'PRIVATE KEY')" "0"
+expect_eq "sign: .signing/ holds nothing afterwards" "$(ls -A "$W/.signing")" ""
+# the tools are the system's: an openssl, bsdtar or coreutils earlier on PATH (on the runner
+# /usr/local/bin comes first) is never run; only pkg comes from PATH or PKG=
+mkdir -p "$T/evil"
+for t in openssl bsdtar cut tr grep cmp head tail wc date mktemp cp cat rm ls mkdir; do
+	# shellcheck disable=SC2016 # $EVIL_RAN belongs to the decoy
+	printf '#!/bin/sh\necho %s >>"$EVIL_RAN"\nexit 1\n' "$t" >"$T/evil/$t"
+	chmod +x "$T/evil/$t"
+done
+signdir os-alpha-1.1.pkg
+rm -f "$T/evil.ran"
+sg "STUB_PATH=$PATH" "PATH=$T/evil:$PATH" "EVIL_RAN=$T/evil.ran" >/dev/null 2>&1
+expect_eq "sign: no tool from earlier on PATH is run" "$(sort -u "$T/evil.ran" 2>/dev/null | tr '\n' ' ')" ""
+expect_eq "sign: signed with the system's tools" "$(stamped "$W/$R" "$T/pub.pem")" "yes"
+# the signing command signs only a sha256 digest: 64 lowercase hex digits, else it answers nothing
+for feed in hello "" "$(printf 'A%.0s' {1..64})" "$(printf 'a%.0s' {1..63})" "$(printf 'a%.0s' {1..65})" \
+	"$(printf 'a%.0s' {1..64}) " "$(printf 'g%.0s' {1..64})"; do
+	signdir os-alpha-1.1.pkg
+	rm -f "$T/reply"
+	expect_fail "sign: the signing command refuses [$feed]" sg "STUB_PKG_FEED=$feed" "STUB_PKG_REPLY=$T/reply"
+	expect_eq "sign: no signature for [$feed]" "$([[ -f $T/reply && ! -s $T/reply ]] && echo empty)" "empty"
+done
+signdir os-alpha-1.1.pkg
+rm -f "$T/reply"
+sg "STUB_PKG_FEED=$(printf '0123456789abcdef%.0s' 1 2 3 4)" "STUB_PKG_REPLY=$T/reply" >/dev/null 2>&1
+expect_eq "sign: the signing command signs a digest" "$(head -n 1 "$T/reply" 2>/dev/null)" "SIGNATURE"
+# a cancelled job: TERM reaches the shell while pkg runs, then pkg; the key is removed all the same
+signdir os-alpha-1.1.pkg
+rm -f "$T/blocked"
+(cd "$W" && exec env STUB_PATH="$PATH" PATH="$root/tests/stub-vm:$PATH" "GITHUB_RUN_ID=$run_id" \
+	"STUB_PKG_BLOCK=$T/blocked" sh scripts/sign-catalogue.sh) >/dev/null 2>&1 &
+scpid=$!
+for _ in $(seq 100); do
+	[[ -s $T/blocked ]] && break
+	sleep 0.1
+done
+kill -TERM "$scpid"
+sleep 0.3
+kill -TERM "$(cat "$T/blocked")" 2>/dev/null
+wait "$scpid" && cancelled=completed || cancelled=failed
+expect_eq "sign: a cancelled run fails" "$cancelled" "failed"
+expect_eq "sign: key removed after a cancellation" "$(ls -A "$W/.signing")" ""
 signdir os-alpha-1.1.pkg os-beta-9.0.pkg
 expect_fail "sign: a release-only package in the catalogue" sg
 expect_eq "sign: key removed after a failure" "$(names "$W/.signing")" "* "
