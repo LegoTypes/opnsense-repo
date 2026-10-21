@@ -51,7 +51,7 @@ for entry in $served; do
 		live_version=$(awk -v p="$pkg" '$1 == "Name" && $3 == p { getline; if ($1 == "Version") print $3 }' <<<"$live")
 		[[ -n $tag || -n $live_version ]] || continue # neither released nor live for this tree
 		[[ -n $tag && $live_version == "${tag#"$pkg"-}" ]] ||
-			die "$entry serves $pkg ${live_version:-(nothing)} but its newest release for $entry is ${tag:-(none)}: re-run the failed jobs of the publish that deployed it; do not publish again"
+			die "$entry serves $pkg ${live_version:-(nothing)} but its newest release for $entry is ${tag:-(none)}: if a publish deployed in the last 10 minutes, this can be the site's cache (Pages caches each file for up to 10 minutes): wait, then re-run this run's failed jobs; otherwise the publish that deployed it has no release yet: re-run its failed jobs; do not publish again"
 	done 3<<<"$catalogue"
 
 	while read -r pkg <&3; do

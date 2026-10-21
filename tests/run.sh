@@ -525,6 +525,10 @@ expect_fail "built package not in the catalogue" cf os-beta
 live os-alpha-1.2 os-alpha-extra-2.0 os-vendor-1.0_1
 expect_fail "live serves a build that has no release (a publish whose release job failed)" cf os-vendor
 expect_fail "the same, for the package being built" cf os-alpha
+# the live site may be the previous deploy, cached, or a deploy whose release job failed: the message names both
+err=$(cf os-vendor 2>&1 >/dev/null)
+expect_eq "a live catalogue that disagrees with the releases: the message names the cache and the failed release" \
+	"$(grep -c 'Pages caches each file for up to 10 minutes' <<<"$err") $(grep -c 'otherwise the publish that deployed it has no release yet: re-run its failed jobs; do not publish again' <<<"$err")" "1 1"
 live os-alpha-1.1 os-vendor-1.0_1
 expect_fail "live lacks a catalogue package that has a release" cf os-vendor
 rm -r "$T/livesite"
@@ -600,6 +604,30 @@ expect_eq "series: the first publish into a new series succeeds with nothing els
 expect_eq "series: the first publish keeps the old series whole" "$(names "$(tree 26.7)")" \
 	"os-alpha-1.1.pkg os-alpha-extra-2.0.pkg os-vendor-1.0.pkg "
 rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
+# the served trees, read again to make them, cannot be read: the run fails (set -e holds), even with
+# nothing to carry; a stand-in repo.sh fails its second "serve" (carry-plan.sh asks first)
+rm -rf "$T/cfs" && cp -R "$S" "$T/cfs" && mv "$T/cfs/repo.sh" "$T/cfs/repo.real.sh"
+cat >"$T/cfs/repo.sh" <<'EOF'
+#!/bin/sh
+if [ "$1" = serve ]; then
+	n=$(($(cat "$CFS_COUNT" 2>/dev/null || echo 0) + 1))
+	echo "$n" >"$CFS_COUNT"
+	[ "$n" -lt 2 ] || { echo "repo.sh: cannot read repo.conf" >&2; exit 1; }
+fi
+exec sh "$(dirname "$0")/repo.real.sh" "$@"
+EOF
+conf 'os-alpha Org/plugins br net/alpha yes'
+reset_stub
+rm -rf "$T/livesite"
+rm -f "$T/cfs.count"
+expect_fail "carry-forward: served trees it cannot read fail the run" \
+	sh -c 'rm -rf "$1/cfw" && mkdir -p "$1/cfw" && cd "$1/cfw" && CFS_COUNT="$1/cfs.count" bash "$1/cfs/carry-forward.sh" os-alpha' \
+	_ "$T"
+expect_eq "carry-forward: carry-plan.sh read the trees first" "$(cat "$T/cfs.count" 2>/dev/null)" 2
+conf 'os-alpha        Org/plugins br   net/alpha yes' \
+	'os-alpha-extra  Org/plugins br   net/extra yes' \
+	'os-beta         Org/plugins br   net/beta  no' \
+	'os-vendor       .           main vendor/v  yes'
 
 # --- manifest.sh and carry-forward's manifest ---------------------------------------
 # mf <built>: manifest.sh in $T/mo with the cf configuration

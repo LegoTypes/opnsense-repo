@@ -43,7 +43,10 @@ if [[ $need_immutable == yes ]]; then
 	[[ -z $notimm ]] || die "REQUIRE_IMMUTABLE_RELEASES=yes but not immutable: $notimm"
 fi
 
-for entry in $(sh "$here/repo.sh" serve); do
+# every served tree exists, even one with nothing to carry; read whole first, so a failure stops the run
+served=$(sh "$here/repo.sh" serve) || die "cannot read the served trees"
+mapfile -t entries <<<"$served"
+for entry in "${entries[@]}"; do
 	tree=$(sh "$here/repo.sh" tree "$entry")
 	mkdir -p "$tree/All"
 done
