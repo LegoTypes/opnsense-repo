@@ -18,20 +18,20 @@ The plugins, what they do and how to install them: <https://legotypes.github.io>
 
 1. Commit the change on its branch with a `PLUGIN_VERSION` or `PLUGIN_REVISION` bump and push it. A run whose version already has a release fails before anything is published: pkg would not see an unchanged version as an update.
 2. Start the workflow at the commit to publish, named in full. For `os-legotypes`, from `main` at its head (after a `git fetch`): `gh workflow run publish -R LegoTypes/opnsense-repo -f package=os-legotypes -f commit=$(git rev-parse origin/main)`; the run refuses any commit but the one it runs at. For a plugin, a commit on its branch, for example `gh workflow run publish -R LegoTypes/opnsense-repo -f package=os-wan-failover -f commit=$(git -C <plugins checkout> rev-parse origin/add-wan-failover)`; a commit that is not on the package's branch is refused.
-3. The `build` job builds exactly that commit in FreeBSD 15. It holds no secret and names no environment. It ends with a summary on the run's page; read it before approving:
+3. The `build` job builds exactly that commit in FreeBSD 15 and uploads the package; it holds no secret and names no environment, and nothing it does after the VM is trusted. The `review` job then runs on a runner of its own, with this repository's scripts and GitHub's actions only: it writes the release notes' source and build lines itself (the commit and the plugin source, `repo.conf` and OPNsense's mirror, never the VM's lines), checks the version is new, and ends with a summary on the run's page. Read it before approving:
    - the commit, the built file with its sha256, and the source line its release notes will start with;
    - the manifest: every release that will be carried forward, with the sha256 its notes record and whether it is immutable;
    - the payload check: whether the package holds exactly what the plugin source at the commit installs, and its install scripts as pkg will run them (the one part of a package not taken from `src/`);
    - the material differences from the package's newest release (`compare-package.sh`, as the canary reports them);
-   - the version file the package installs, and the build environment.
+   - the version file the package installs, and the release notes' build lines (the FreeBSD version as the build VM reported it).
 
    Everything the build made is shown as it is, in code blocks.
-4. Approve the `release` environment only for the build you meant. Its `sign` job holds the signing key and runs only GitHub's own actions and this repository's scripts. Before the key is staged it checks the package against the plugin source at the commit again, and refuses one that fails the payload check; it builds `pkg` from the source pinned in [`repo.conf`](repo.conf), and carries the other catalogue packages forward from their releases, each checked against the sha256 in its notes, refusing any change from the approved manifest. It then signs the catalogue and stamps each served tree. `publish` deploys it to Pages and, only then, records the build as the release `<package>-<version>`.
+4. Approve the `release` environment only for the build you meant. Its `sign` job holds the signing key and runs only GitHub's own actions and this repository's scripts. Before the key is staged it checks the package against the plugin source at the commit again, and refuses one that fails the payload check; it checks again that the version has no release (an approval can come hours later); it builds `pkg` from the source pinned in [`repo.conf`](repo.conf), and carries the other catalogue packages forward from their releases, each checked against the sha256 in its notes, refusing any change from the manifest the review job wrote. It then signs the catalogue and stamps each served tree. `publish` deploys it to Pages and, only then, records the build as the release `<package>-<version>`.
 5. Firewalls update from System > Firmware > Plugins, or with `pkg upgrade`.
 
 The site serves the signed repository, its public key and `packages.txt`, and no package at its root: `os-legotypes` itself installs from the signed repository (<https://legotypes.github.io/install/>).
 
-**If the `sign` job fails** (a payload check, a release changed since approval), nothing was published: fix the cause and start a new publish. It reports "no package artifact: re-run the whole workflow" when the build's artifact is gone; use **Re-run all jobs**.
+**If the `sign` job fails** (a payload check, a release changed since approval), nothing was published: fix the cause and start a new publish. It reports "no package artifact: re-run the whole workflow" when the build's or the review's artifact is gone; use **Re-run all jobs**.
 
 **If a run fails after its deploy** (the catalogue went live but the `release` job did not create the release): use **Re-run failed jobs** on that run; its artifact still holds the deployed build. Never start a new publish for it: that would build it again, a different file under the same version. Until the release exists, every publish fails at carry-forward, which checks that the live catalogue serves exactly each package's newest release, so nothing is silently rolled back.
 
@@ -75,7 +75,7 @@ The canary never publishes. A finding is acted on by a person:
    - Its scenario harness where one exists.
    - The install rehearsal through the setup script with `OPNSENSE_HOST` pointing at the test VM.
 4. **Publish.** Push the branch, then run `gh workflow run publish -R LegoTypes/opnsense-repo -f
-   package=<package> -f commit=<the branch's commit>`, read the build job's summary, approve `release`, and
+   package=<package> -f commit=<the branch's commit>`, read the review job's summary, approve `release`, and
    run `bash scripts/verify-catalogue.sh <package>`.
 5. **Firewall.**
    - A new plugin installs with its setup-script command (for example `opnsense install-wan-failover`).
