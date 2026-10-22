@@ -1599,7 +1599,7 @@ vpkg '.annotations.product_abi = "27.1"'
 vfail "payload: the wrong series" "+MANIFEST product_abi is 27.1, expected 26.7"
 vpkg '.lua_scripts = {"post-install": ["print(1)"]}'
 vfail "payload: a manifest key it does not check" "+MANIFEST key lua_scripts is not expected"
-VPKG_COMPACT='.deps = {"php85-curl": {"origin": "ftp/php85-curl", "version": "8.5.0"}}' vpkg
+VPKG_COMPACT='.comment = "Beta"' vpkg
 vfail "payload: a compact manifest that differs" "+COMPACT_MANIFEST differs from +MANIFEST"
 vpkg '.scripts["post-install"] = "echo \u001b[2Kinstalled"'
 vfail "payload: a script with control characters" "script post-install holds characters other than printable ASCII, tab and newline"
@@ -1615,12 +1615,20 @@ printf '<?php\n' >"$vs/opnsense/new.php"
 vpkg '.files["/usr/local/opnsense/new.php"] = {sum: "1$x", uname: "root", gname: "wheel", perm: "0644", mtime: 1}'
 vfail "payload: a +MANIFEST file the archive lacks" "/usr/local/opnsense/new.php is not in the archive"
 vreset
+# dependencies: refused, wherever they appear, until their origin and version can be derived
+nodeps="dependencies are not supported until their origin and version are derived from the verified upstream catalogue (spec -01 §3.3)"
 vpkg '.deps = {"php85-curl": {"origin": "ftp/php85-curl", "version": "8.5.0"}}'
-vfail "payload: dependencies without PLUGIN_DEPENDS" "dependencies (php85-curl) differ from PLUGIN_DEPENDS (none)"
+vfail "payload: a dependency in +MANIFEST" "+MANIFEST deps: $nodeps"
+vpkg '.deps = {}'
+vfail "payload: an empty deps object" "+MANIFEST deps: $nodeps"
+VPKG_COMPACT='.deps = {"php85-curl": {"origin": "ftp/php85-curl", "version": "8.5.0"}}' vpkg
+vfail "payload: a dependency in +COMPACT_MANIFEST only" "+COMPACT_MANIFEST deps: $nodeps"
 vmk "${vdef[@]}" $'PLUGIN_DEPENDS=\t\tphp85-curl \\\n\t\t\tphp85-xml'
-vfail "payload: PLUGIN_DEPENDS without the dependencies" "dependencies (php85-curl) differ from PLUGIN_DEPENDS (php85-curl php85-xml)"
+vfail "payload: PLUGIN_DEPENDS in the Makefile" "Makefile: PLUGIN_DEPENDS: $nodeps"
 vpkg '.deps = {"php85-curl": {"origin": "ftp/php85-curl", "version": "8.5.0"}, "php85-xml": {"origin": "textproc/php85-xml", "version": "8.5.0"}}'
-vpass "payload: dependencies equal to PLUGIN_DEPENDS"
+vfail "payload: PLUGIN_DEPENDS with matching dependencies" "Makefile: PLUGIN_DEPENDS: $nodeps"
+vmk "${vdef[@]}" 'PLUGIN_DEPENDS='
+vfail "payload: an empty PLUGIN_DEPENDS" "Makefile: PLUGIN_DEPENDS: $nodeps"
 vreset
 vmk "${vdef[@]}" $'PLUGIN_VARIANTS=\tA B'
 vfail "payload: plugin variants" "Makefile: PLUGIN_VARIANTS is not supported"
@@ -1869,11 +1877,6 @@ ln -s ../../../etc/hosts "$vp/net/alpha/pkg-descr"
 vfail "payload: a pkg-descr that is a symbolic link" "$vp/net/alpha: no pkg-descr"
 vreset
 # dependency entries and file entries: exactly the keys pkg create writes (pkg reads their keys in any case)
-vmk "${vdef[@]}" $'PLUGIN_DEPENDS=\tphp85-curl'
-vpkg '.deps = {"php85-curl": {"origin": "ftp/php85-curl", "version": "8.5.0", "ORIGIN": "x/evil"}}'
-vfail "payload: a dependency with a key pkg create does not write" "+MANIFEST dependencies are not entries of exactly an origin and a version"
-vpkg '.deps = {"php85-curl": {"origin": "ftp/php85-curl", "version": 8}}'
-vfail "payload: a dependency version that is not a string" "+MANIFEST dependencies are not entries of exactly an origin and a version"
 vreset
 vpkg --arg p "$volt" '.files[$p].fflags = "schg"'
 vfail "payload: file flags in +MANIFEST" "+MANIFEST file $volt is not exactly gname, mtime, perm, sum and uname"

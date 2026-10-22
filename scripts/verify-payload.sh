@@ -29,11 +29,12 @@
 #    licenselogic single, licenses PLUGIN_LICENSE (BSD2CLAUSE), arch the ABI's legacy
 #    form (libpkg pkg_arch_to_legacy), desc pkg-descr trimmed of blanks at both ends
 #    (UCL_STRING_TRIM) and compared as pkg reads it, url-decoded (STRING_FLAG_URLDECODE);
-#    dependency names equal PLUGIN_DEPENDS, each entry exactly an origin and a version;
-#    scripts only under pkg's script names, printable ASCII, tab and newline, no
-#    %-escape but %25 (pkg url-decodes scripts). Not derivable, so not compared: a
-#    dependency's origin and version (what the build VM had installed) and each file's
-#    mtime; the scripts are shown to the approver.
+#    no dependencies at all (no deps key in either manifest, no PLUGIN_DEPENDS: a
+#    dependency's origin and version are what the build VM had installed, which nothing
+#    trusted gives, so dependencies wait until they are derived from the verified upstream
+#    catalogue, spec -01 §3.3); scripts only under pkg's script names, printable ASCII,
+#    tab and newline, no %-escape but %25 (pkg url-decodes scripts). Not derivable, so not
+#    compared: each file's mtime; the scripts are shown to the approver.
 # 2. The version file: no key repeated, exactly the derived ten values; the
 #    annotations repeat it, and add FreeBSD_version: all digits, of the ABI's major.
 # 3. The files: +MANIFEST's map one to one onto src/, each entry exactly the keys
@@ -50,7 +51,7 @@
 # ("script post-install:") and its lines indented by a tab; on the first problem
 # exits 1 with the reason on stderr.
 # Not modelled, so refused: contrib/, Makefile variables other than those above
-# and PLUGIN_COMMENT, PLUGIN_DEPENDS and PLUGIN_LICENSE, values holding $, `, " or
+# and PLUGIN_COMMENT and PLUGIN_LICENSE, any PLUGIN_DEPENDS, values holding $, `, " or
 # \ (make or sh would expand them) or &, = or %% (sed would not copy them
 # literally), a PLUGIN_LICENSE of more than one word, a man page with .shadow, file
 # names outside [A-Za-z0-9._+,@=~-], a .in file that is not UTF-8, and a pkg-descr
@@ -111,6 +112,10 @@ while IFS= read -r l; do
 	esac
 done <"$work/makefile"
 [[ -n $included ]] || die 'Makefile: no .include "../../Mk/plugins.mk"'
+# dependencies are refused until their origin and version are derived from trusted inputs:
+# plugins.mk's manifest takes both from the build VM's pkg database (plugins.mk:140-149)
+nodeps="dependencies are not supported until their origin and version are derived from the verified upstream catalogue (spec -01 §3.3)"
+[[ -z ${mk[PLUGIN_DEPENDS]+set} ]] || die "Makefile: PLUGIN_DEPENDS: $nodeps"
 for v in PLUGIN_NAME PLUGIN_VERSION PLUGIN_COMMENT; do
 	[[ -n ${mk[$v]:-} ]] || die "Makefile: $v is not set"
 done
@@ -172,8 +177,6 @@ want=$(jq -cn --arg abi "$series" --arg arch "${abi##*:}" --arg conflicts "$conf
 	'{product_abi: $abi, product_arch: $arch, product_conflicts: $conflicts, product_email: $email,
 	product_hash: $hash, product_id: $id, product_name: $name, product_tier: $tier, product_version: $version,
 	product_website: $www}')
-read -ra words <<<"${mk[PLUGIN_DEPENDS]:-}"
-want_deps=$(jq -rn '$ARGS.positional | unique | join(" ")' --args "${words[@]}")
 
 # 0. the archive: names, types and attributes as libarchive reads them; bsdtar must say nothing on stderr
 bt() { # bt <output file> <bsdtar arguments>...
@@ -223,7 +226,10 @@ json "$work/manifest" +MANIFEST
 json "$work/compact" +COMPACT_MANIFEST
 jq -e 'type == "object"' "$work/manifest" >/dev/null || die "+MANIFEST is not a JSON object"
 M=$(jq -c . "$work/manifest")
-unexpected=$(jq -r '(keys - ["abi", "annotations", "arch", "categories", "comment", "deps", "desc", "files", "flatsize",
+for f in +MANIFEST:manifest +COMPACT_MANIFEST:compact; do
+	if jq -e 'type == "object" and has("deps")' "$work/${f#*:}" >/dev/null; then die "${f%%:*} deps: $nodeps"; fi
+done
+unexpected=$(jq -r '(keys - ["abi", "annotations", "arch", "categories", "comment", "desc", "files", "flatsize",
 	"licenselogic", "licenses", "maintainer", "name", "origin", "prefix", "scripts", "version", "www"])[0] // empty' <<<"$M")
 [[ -z $unexpected ]] || die "+MANIFEST key $unexpected is not expected"
 jq -es --argjson m "$M" '.[0] == ($m | del(.files, .scripts))' "$work/compact" >/dev/null ||
@@ -277,12 +283,6 @@ v=$(jq -r '.scripts // {} | to_entries
 [[ -z $v ]] || die "script $v holds characters other than printable ASCII, tab and newline"
 v=$(jq -r '.scripts // {} | to_entries | map(select(.value | test("%(?!25)")))[0].key // empty' <<<"$M")
 [[ -z $v ]] || die "script $v holds a %-escape other than %25, which pkg would decode"
-# pkg reads a dependency's origin and version keys in any case: exactly those two, as strings
-jq -e '.deps // {} | type == "object" and all(.[]; type == "object" and keys == ["origin", "version"] and all(.[]; type == "string"))' \
-	<<<"$M" >/dev/null || die "+MANIFEST dependencies are not entries of exactly an origin and a version"
-have_deps=$(jq -r '.deps // {} | keys | join(" ")' <<<"$M")
-[[ $have_deps == "$want_deps" ]] ||
-	die "dependencies (${have_deps:-none}) differ from PLUGIN_DEPENDS (${want_deps:-none})"
 
 # 2. the version file
 jq -e --arg v "$vfile" '.files | type == "object" and has($v)' <<<"$M" >/dev/null || die "+MANIFEST lists no $vfile"
