@@ -7,7 +7,8 @@
 # not exist, with COMMIT checked out; COMMIT must be on the row's branch (an ancestor of its
 # tip), as build-package.sh checks in the VM, so the check holds without the VM. The "." row:
 # the directory as COMMIT's tree holds it, exported into <dest>, which must not exist, blob by blob
-# (git ls-tree and cat-file: no attribute, filter or export-subst changes a byte), with each file's
+# (git ls-tree and cat-file, with --no-replace-objects: no attribute, filter, export-subst or
+# refs/replace/ entry changes a byte), with each file's
 # mode and symbolic links as committed; this checkout must be at COMMIT. Nothing in the working tree
 # (where the build's artifact is unpacked) counts as source: a file there that the commit lacks, or
 # one changed since, never reaches the check.
@@ -33,7 +34,8 @@ if [[ $repo == . ]]; then
 	top=$(git rev-parse --show-toplevel) || die "this is not a checkout"
 	list=$(mktemp)
 	trap 'rm -f "$list"' EXIT
-	git -C "$top" ls-tree -r -z --full-tree "$COMMIT" -- "$dir" >"$list" || die "cannot list $dir at $COMMIT"
+	git --no-replace-objects -C "$top" ls-tree -r -z --full-tree "$COMMIT" -- "$dir" >"$list" ||
+		die "cannot list $dir at $COMMIT"
 	[[ -s $list ]] || die "the commit $COMMIT has no $dir"
 	mkdir -p "$dest"
 	while IFS= read -r -d '' e; do
@@ -43,11 +45,11 @@ if [[ $repo == . ]]; then
 		mkdir -p "$dest/${path%/*}"
 		case $mode in
 		100644 | 100755)
-			git -C "$top" cat-file blob "$obj" >"$dest/$path" || die "cannot read $path at $COMMIT"
+			git --no-replace-objects -C "$top" cat-file blob "$obj" >"$dest/$path" || die "cannot read $path at $COMMIT"
 			chmod "${mode:3}" "$dest/$path"
 			;;
 		120000)
-			target=$(git -C "$top" cat-file blob "$obj") || die "cannot read $path at $COMMIT"
+			target=$(git --no-replace-objects -C "$top" cat-file blob "$obj") || die "cannot read $path at $COMMIT"
 			ln -s "$target" "$dest/$path"
 			;;
 		*) die "$path: a $type of mode $mode is not supported" ;;

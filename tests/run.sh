@@ -417,10 +417,10 @@ expect_eq "build: and then only the upload, of out/ as package" \
 # notes' lines, made by this repository's scripts from its own checkout
 rv=$(ymarks "$B" review)
 expect_eq "review: the steps in order" "$(tr '\n' ',' <<<"$rv")" \
-	"actions/checkout,actions/download-artifact,out-dir.sh,upstream.sh,provenance.sh,release.sh,manifest.sh,plugin-source.sh,ubuntu-apt.sh,summary.sh,review-sums.sh,actions/upload-artifact,"
+	"actions/checkout,plugin-source.sh,actions/download-artifact,out-dir.sh,upstream.sh,provenance.sh,release.sh,manifest.sh,ubuntu-apt.sh,summary.sh,review-sums.sh,actions/upload-artifact,"
 expect_eq "review: the full history, for the last commit that changed this repository's package" \
 	"$(yget "$B" jobs.review.steps.1.with.fetch-depth)" 0
-expect_eq "review: downloads package into out" "$(yget "$B" jobs.review.steps.2.with.name) $(yget "$B" jobs.review.steps.2.with.path)" "package out"
+expect_eq "review: downloads package into out" "$(yget "$B" jobs.review.steps.3.with.name) $(yget "$B" jobs.review.steps.3.with.path)" "package out"
 expect_eq "review: the version check gives the tag" "$(yget "$B" "jobs.review.steps.$(ystep "$rv" release.sh).id")" check
 expect_eq "review: the manifest goes to review/" \
 	"$(yget "$B" "jobs.review.steps.$(ystep "$rv" manifest.sh).run" | tr '\n' ';')" 'bash scripts/manifest.sh "$PACKAGE" out;mv out/manifest review/manifest;'
@@ -436,13 +436,19 @@ expect_eq "review: the artifact is review/" \
 # the sign job: everything that can run code as root or fetch anything comes before the key; the
 # key is removed whatever happens
 sm=$(ymarks "$B" sign)
+# both jobs export the plugin source before any artifact reaches the workspace
+for j in review sign; do
+	expect_eq "$j: the plugin source is exported before every artifact download" \
+		"$(ymarks "$B" "$j" | awk '/^plugin-source\.sh$/ && !p { p = NR } /actions\/download-artifact/ && !d { d = NR }
+			END { print (p && d && p < d) ? "before" : "after" }')" before
+done
 expect_eq "sign: the steps in order" "$(tr '\n' ',' <<<"$sm")" \
-	"actions/checkout,actions/download-artifact,actions/download-artifact,out-dir.sh review-sums.sh,plugin-source.sh,ubuntu-apt.sh,payload.sh,release.sh,pkg-tool.sh,carry-forward.sh,stage,sign-catalogue.sh,unstage,actions/upload-pages-artifact,"
+	"actions/checkout,plugin-source.sh,actions/download-artifact,actions/download-artifact,out-dir.sh review-sums.sh,ubuntu-apt.sh,payload.sh,release.sh,pkg-tool.sh,carry-forward.sh,stage,sign-catalogue.sh,unstage,actions/upload-pages-artifact,"
 pt_step=$(ystep "$sm" pkg-tool.sh) stage_step=$(ystep "$sm" stage) rel_step=$(ystep "$sm" release.sh)
 chk_step=$(ystep "$sm" review-sums.sh)
 expect_eq "sign: right after the downloads, the files are checked against review's sums" \
 	"$chk_step $(yget "$B" "jobs.sign.steps.$chk_step.run" | tail -2 | tr '\n' ';')" \
-	'4 bash scripts/out-dir.sh "$PACKAGE" out;bash scripts/review-sums.sh check "$PACKAGE" out review;'
+	'5 bash scripts/out-dir.sh "$PACKAGE" out;bash scripts/review-sums.sh check "$PACKAGE" out review;'
 expect_eq "sign: the sums come from the review job's outputs through env, the commit from the input" \
 	"$(for o in PKG MANIFEST SOURCE BUILD; do printf '%s ' "$(yget "$B" "jobs.sign.steps.$chk_step.env.${o}_SHA256")"; done)$(yget "$B" jobs.sign.env.COMMIT)" \
 	'${{ needs.review.outputs.pkg_sha256 }} ${{ needs.review.outputs.manifest_sha256 }} ${{ needs.review.outputs.source_sha256 }} ${{ needs.review.outputs.build_sha256 }} ${{ inputs.commit }}'
@@ -452,7 +458,7 @@ expect_eq "sign: the version is checked again before the key is staged" \
 	"$([[ -n $rel_step && -n $stage_step ]] && ((rel_step < stage_step)) && echo before) $(yget "$B" "jobs.sign.steps.$rel_step.run")" \
 	'before bash scripts/release.sh check out/*.pkg'
 expect_eq "sign: downloads package into out and review into review" \
-	"$(for i in 2 3; do printf '%s=%s ' "$(yget "$B" "jobs.sign.steps.$i.with.name")" "$(yget "$B" "jobs.sign.steps.$i.with.path")"; done)" \
+	"$(for i in 3 4; do printf '%s=%s ' "$(yget "$B" "jobs.sign.steps.$i.with.name")" "$(yget "$B" "jobs.sign.steps.$i.with.path")"; done)" \
 	"package=out review=review "
 expect_eq "sign: the key comes from the release environment's secret" \
 	"$(yget "$B" "jobs.sign.steps.$stage_step.env.PKG_SIGNING_KEY")" '${{ secrets.PKG_SIGNING_KEY }}'
@@ -2937,6 +2943,30 @@ expect_eq "plugin-source: modes and symbolic links as committed" \
 expect_fail "plugin-source: the destination exists" ps "$T/fresh" "$v_head" os-vendor "$T/src"
 rm -rf "$T/src"
 expect_fail "plugin-source: this checkout is not at the commit" ps "$T/fresh" "$c_one" os-vendor "$T/src"
+# a refs/replace/ entry (a loose object and a ref, all the workspace needs) changes nothing in the export
+blob=$(git -C "$T/fresh" rev-parse "$v_head:vendor/v/Makefile")
+other=$(printf 'replaced\n' | git -C "$T/fresh" hash-object -w --stdin)
+gitq -C "$T/fresh" replace "$blob" "$other"
+expect_eq "plugin-source: the fixture's git reads the replaced blob" "$(git -C "$T/fresh" cat-file blob "$blob")" replaced
+rm -rf "$T/src"
+ps "$T/fresh" "$v_head" os-vendor "$T/src" >/dev/null 2>&1 || bad "plugin-source: with a replace ref exited non-zero"
+expect_eq "plugin-source: a replace ref does not change the export" "$(cat "$T/src/vendor/v/Makefile")" "PLUGIN_NAME= v"
+gitq -C "$T/fresh" replace -d "$blob"
+# refusals: an entry that is no file or link (a submodule), a directory that names a file, a commit without it
+conf 'os-vendor  .  main  vendor/v  yes' 'os-file  .  main  vendor/v/Makefile  yes' 'os-none  .  main  vendor/none  yes'
+gitq -C "$T/fresh" update-index --add --cacheinfo "160000,$v_head,vendor/v/sub"
+gitq -C "$T/fresh" commit -qm submodule
+v_sub=$(git -C "$T/fresh" rev-parse HEAD)
+rm -rf "$T/src"
+expect_eq "plugin-source: a submodule entry is refused" "$(ps "$T/fresh" "$v_sub" os-vendor "$T/src" 2>&1 >/dev/null)" \
+	"plugin-source.sh: vendor/v/sub: a commit of mode 160000 is not supported"
+rm -rf "$T/src"
+expect_eq "plugin-source: a path outside the directory is refused" "$(ps "$T/fresh" "$v_sub" os-file "$T/src" 2>&1 >/dev/null)" \
+	"plugin-source.sh: vendor/v/Makefile is not under vendor/v/Makefile"
+rm -rf "$T/src"
+expect_eq "plugin-source: a commit without the directory is refused" "$(ps "$T/fresh" "$v_sub" os-none "$T/src" 2>&1 >/dev/null)" \
+	"plugin-source.sh: the commit $v_sub has no vendor/none"
+conf 'os-alpha   Org/plugins br-alpha net/alpha yes' 'os-vendor  .           main     vendor/v  yes'
 
 # --- provenance.sh: the release notes' lines, from trusted inputs --------------------------------
 rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
@@ -2947,8 +2977,6 @@ pv() {
 		UPSTREAM_PHP="${PV_PHP-85}" UPSTREAM_PYTHON="${PV_PY-313}" GITHUB_REPOSITORY=Org/repo \
 		bash "$S/provenance.sh" "$2" "$od" "$T/rev")
 }
-# this repository's package: the directory as the commit's tree holds it, exported into <dest>, never the
-# working tree (where the build's artifact is unpacked)
 # pvwith <VAR=value> <pv arguments>: pv with PV_PHP or PV_PY set so
 pvwith() {
 	local "$1"
