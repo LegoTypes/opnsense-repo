@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # verify-catalogue.sh <package>
 # After a publish, check what firewalls will check: every served tree's catalogue
-# (data in data.pkg) is signed by the published key, every served tree's stamp
-# (stamp, stamp.sig, stamp.pub) is there, signed by the published key as
-# sign-catalogue.sh signs it, carries that key and names that tree; the target tree
+# (data in data.pkg) is signed by the published key, every served tree's stamp is
+# there, one file in stamp-check.sh's format, signed by the published key as
+# sign-catalogue.sh signs it, carrying that key and naming that tree; the target tree
 # serves the package's newest release, and that release's asset matches the sha256 in
 # its notes. The published key is keys/legotypes-pkg-signing.pub beside this script's
 # directory, and nothing overrides it. LIVE_SITE (default
@@ -15,8 +15,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 site=${LIVE_SITE:-https://legotypes.github.io/opnsense-repo}
 pub=$here/../keys/legotypes-pkg-signing.pub
 # Pages caches each file for up to 10 minutes (cache-control: max-age=600), and a query
-# string does not bypass it: straight after a deploy one file can be the new one and the
-# file beside it still the previous deploy's
+# string does not bypass it: straight after a deploy packages.txt can still be the previous
+# deploy's (data.pkg and the stamp are each one file, so each is whole, old or new)
 cached="straight after a publish, Pages may still serve the previous deploy for up to 10 minutes: retry then"
 
 die() {
@@ -25,7 +25,7 @@ die() {
 }
 
 # verify <file> <signature>: the signature over the file's sha256 hex verifies with the
-# published key, as pkg checks a catalogue file and os-legotypes the stamp
+# published key, as pkg checks a catalogue file
 verify() {
 	openssl dgst -sha256 -r "$1" | cut -d' ' -f1 | tr -d '\n' |
 		openssl dgst -sha256 -verify "$pub" -signature "$2" >/dev/null
@@ -50,14 +50,9 @@ for i in "${!entries[@]}"; do
 	cmp -s "$w/data.pub" "$pub" || die "the $entry catalogue carries a key other than $pub"
 	verify "$w/data" "$w/data.sig" || die "the $entry catalogue's signature does not verify with $pub"
 	echo "$entry: catalogue signature verified"
-	for f in stamp stamp.sig stamp.pub; do
-		curl -fsSL -o "$w/$f" "$url/$f" || die "cannot fetch $entry $f: the tree has no stamp"
-	done
-	cmp -s "$w/stamp.pub" "$pub" || die "the $entry stamp carries a key other than $pub"
-	verify "$w/stamp" "$w/stamp.sig" || die "the $entry stamp's signature does not verify with $pub ($cached)"
-	stamp_tree=$(sed -n 's/^tree: //p' "$w/stamp")
-	[[ $stamp_tree == "$entry" ]] || die "the $entry stamp names the tree ${stamp_tree:-(none)}"
-	echo "$entry: stamp verified, $(sed -n 's/^published: /published /p' "$w/stamp")"
+	curl -fsSL -o "$w/stamp" "$url/stamp" || die "cannot fetch $entry stamp: the tree has no stamp"
+	published=$(sh "$here/stamp-check.sh" "$w/stamp" "$pub" "$entry") || die "the $entry stamp does not check"
+	echo "$entry: stamp verified, $published"
 done
 
 tag=$(bash "$here/newest-release.sh" "$pkg" "$target")

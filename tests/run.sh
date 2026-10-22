@@ -946,19 +946,39 @@ signdir() {
 # sg [VAR=value...]: sign-catalogue.sh as the sign job runs it, with the workflow run's id
 run_id=4815162342
 sg() { vmenv "GITHUB_RUN_ID=$run_id" "$@" -- sign-catalogue.sh; }
-# stamped <tree dir> <public key>: yes if the tree's stamp verifies with the key as os-legotypes
-# checks it (the signature over the stamp's sha256 hex, as pkg signs a catalogue file), else no
+# The stamp is one file: the body lines, the published key byte for byte, and last a line
+# "signature: <base64>", the signature over the sha256 hex of every byte before that line.
+# stamped <stamp> <public key>: yes if its last line signs everything before it with the key, as
+# os-legotypes checks it (checked here independently of scripts/stamp-check.sh), else no
 stamped() {
-	if openssl dgst -sha256 -r "$1/stamp" | cut -d' ' -f1 | tr -d '\n' |
-		openssl dgst -sha256 -verify "$2" -signature "$1/stamp.sig" >/dev/null 2>&1; then
+	local n
+	n=$(wc -l <"$1" | tr -d ' ')
+	sed -n "${n}s/^signature: //p" "$1" | openssl base64 -d -A >"$T/stamp.sigbin" 2>/dev/null
+	if head -n "$((n - 1))" "$1" | openssl dgst -sha256 -r | cut -d' ' -f1 | tr -d '\n' |
+		openssl dgst -sha256 -verify "$2" -signature "$T/stamp.sigbin" >/dev/null 2>&1; then
 		echo yes
 	else
 		echo no
 	fi
 }
-# fields <stamp>: the stamp with its date replaced by <UTC> if it is a UTC ISO-8601 time
+# fields <stamp>: its first three lines, the date replaced by <UTC> if it is a UTC ISO-8601 time
 fields() {
-	sed 's/^published: [0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}Z$/published: <UTC>/' "$1"
+	sed -n '1,3s/^published: [0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}Z$/published: <UTC>/;1,3p' "$1"
+}
+# signbody <body> <stamp> [<signing key>]: <stamp> is <body> and its signature line, signed as
+# sign-catalogue.sh signs it (RSA PKCS#1 v1.5, so the same bytes give the same signature)
+signbody() {
+	local s
+	s=$(openssl dgst -sha256 -r "$1" | cut -d' ' -f1 | tr -d '\n' | openssl dgst -sha256 -sign "${3:-$T/key.pem}" -binary |
+		openssl base64 -A)
+	{ cat "$1"; printf 'signature: %s\n' "$s"; } >"$2"
+}
+# mkstamp <stamp> <ABI/series> [<signing key> [<embedded key>]]: a stamp as sign-catalogue.sh writes
+# one, published 2026-10-21T12:00:00Z by run 4815162342
+mkstamp() {
+	{ printf 'published: 2026-10-21T12:00:00Z\nrun: 4815162342\ntree: %s\n' "$2"; cat "${4:-$T/pub.pem}"; } >"$1.body"
+	signbody "$1.body" "$1" "${3:-}"
+	rm "$1.body"
 }
 exists() { if [[ -e $1 ]]; then echo yes; else echo no; fi; }
 # norun <command...>: the command with GITHUB_RUN_ID unset (a workflow run sets it)
@@ -979,17 +999,30 @@ expect_eq "sign: the tree has its own packages.txt" "$(cat "$W/$R/packages.txt")
 expect_eq "sign: key removed" "$(names "$W/.signing")" "* "
 expect_eq "sign: the stamp names the time, the run and the tree" "$(fields "$W/$R/stamp")" \
 	$'published: <UTC>\nrun: 4815162342\ntree: FreeBSD:15:amd64/26.7'
-expect_eq "sign: the stamp's key is the published key" "$(cat "$W/$R/stamp.pub")" "$(cat "$T/pub.pem")"
-expect_eq "sign: the stamp verifies with the published key" "$(stamped "$W/$R" "$T/pub.pem")" "yes"
-expect_eq "sign: the stamp does not verify with another key" "$(stamped "$W/$R" "$T/other.pub")" "no"
-mkdir -p "$T/forged"
-cp "$W/$R/stamp.sig" "$T/forged/"
-sed 's/^published: .*/published: 2099-01-01T00:00:00Z/' "$W/$R/stamp" >"$T/forged/stamp"
-expect_eq "sign: a stamp given another date does not verify" "$(stamped "$T/forged" "$T/pub.pem")" "no"
-printf 'published: %s\nrun: %s\ntree: %s\n' "$(sed -n 's/^published: //p' "$W/$R/stamp")" "$run_id" \
-	FreeBSD:15:amd64/26.7 >"$T/stamp.expected"
-expect_eq "sign: the stamp is exactly three LF-terminated lines" \
-	"$(cmp -s "$W/$R/stamp" "$T/stamp.expected" && echo same) $(wc -l <"$W/$R/stamp" | tr -d ' ')" "same 3"
+expect_eq "sign: the stamp's key block is the published key, byte for byte" \
+	"$(sed -n '4,/^-----END PUBLIC KEY-----$/p' "$W/$R/stamp" | cmp -s - "$T/pub.pem" && echo same)" same
+expect_eq "sign: the stamp verifies with the published key" "$(stamped "$W/$R/stamp" "$T/pub.pem")" "yes"
+expect_eq "sign: the stamp does not verify with another key" "$(stamped "$W/$R/stamp" "$T/other.pub")" "no"
+sed 's/^published: .*/published: 2099-01-01T00:00:00Z/' "$W/$R/stamp" >"$T/forged.stamp"
+expect_eq "sign: a stamp given another date does not verify" "$(stamped "$T/forged.stamp" "$T/pub.pem")" "no"
+# exactly the body, the key and the signature line, nothing else (the signature is deterministic)
+{
+	printf 'published: %s\nrun: %s\ntree: %s\n' "$(sed -n '1s/^published: //p' "$W/$R/stamp")" "$run_id" FreeBSD:15:amd64/26.7
+	cat "$T/pub.pem"
+} >"$T/stamp.body"
+signbody "$T/stamp.body" "$T/stamp.expected"
+expect_eq "sign: the stamp is the body, the key and one signature line, each LF-terminated" \
+	"$(cmp -s "$W/$R/stamp" "$T/stamp.expected" && echo same) $(wc -l <"$W/$R/stamp" | tr -d ' ')" \
+	"same $(($(wc -l <"$T/pub.pem") + 4))"
+expect_eq "sign: one file, no stamp.sig or stamp.pub beside it" "$(exists "$W/$R/stamp.sig") $(exists "$W/$R/stamp.pub")" "no no"
+# the key the stamps embed is the one os-legotypes ships the fingerprint of: sha256 of
+# keys/legotypes-pkg-signing.pub, byte for byte as pkg fingerprints a key, is trusted/legotypes.20260926
+expect_eq "the published key's sha256 is exactly the trusted fingerprint file" \
+	"$(printf 'function: "sha256"\nfingerprint: "%s"\n' "$(sum "$root/keys/legotypes-pkg-signing.pub")")" \
+	"$(cat "$root/vendor/legotypes/src/etc/pkg/fingerprints/LegoTypes/trusted/legotypes.20260926")"
+expect_eq "the trusted fingerprint file is those two lines exactly" \
+	"$(printf 'function: "sha256"\nfingerprint: "%s"\n' "$(sum "$root/keys/legotypes-pkg-signing.pub")" |
+		cmp -s - "$root/vendor/legotypes/src/etc/pkg/fingerprints/LegoTypes/trusted/legotypes.20260926" && echo same)" same
 # nothing published holds the private key, inside the catalogue archives either, and
 # .signing/ is left empty, dot files included
 expect_eq "sign: no file under site/ holds a private key" "$(grep -rl 'PRIVATE KEY' "$W/site" "$W/out")" ""
@@ -1018,7 +1051,7 @@ signdir os-alpha-1.1.pkg
 rm -f "$T/evil.ran"
 sg "STUB_PATH=$PATH" "PATH=$T/evil:$PATH" "EVIL_RAN=$T/evil.ran" >/dev/null 2>&1
 expect_eq "sign: no tool from earlier on PATH is run" "$(sort -u "$T/evil.ran" 2>/dev/null | tr '\n' ' ')" ""
-expect_eq "sign: signed with the system's tools" "$(stamped "$W/$R" "$T/pub.pem")" "yes"
+expect_eq "sign: signed with the system's tools" "$(stamped "$W/$R/stamp" "$T/pub.pem")" "yes"
 # the published key, the trusted fingerprints, repo.conf and packages.conf are the script's own
 # checkout's, never the working directory's (which holds only out/, .signing/ and site/): a working
 # directory with another key and a fingerprint for it changes nothing
@@ -1033,7 +1066,7 @@ printf 'function: "sha256"\nfingerprint: "%s"\n' "$(sum "$T/other.pub")" \
 expect_eq "sign: from another working directory, the key published is the script's checkout's" \
 	"$(cat "$T/wd/site/legotypes-pkg-signing.pub" 2>/dev/null)" "$(cat "$T/pub.pem")"
 expect_eq "sign: from another working directory, the stamp verifies with the script's checkout's key" \
-	"$(stamped "$T/wd/$R" "$T/pub.pem")" "yes"
+	"$(stamped "$T/wd/$R/stamp" "$T/pub.pem")" "yes"
 signdir os-alpha-1.1.pkg
 rm -rf "$T/wd"
 cp -R "$W" "$T/wd"
@@ -1046,7 +1079,7 @@ rm -rf "$T/it's a checkout"
 cp -R "$W" "$T/it's a checkout"
 (cd "$T/it's a checkout" && STUB_PATH="$PATH" PATH="$root/tests/stub-vm:$PATH" GITHUB_RUN_ID=$run_id \
 	sh "$T/it's a checkout/scripts/sign-catalogue.sh") >/dev/null 2>&1
-expect_eq "sign: a checkout whose path holds a quote and a space" "$(stamped "$T/it's a checkout/$R" "$T/pub.pem")" "yes"
+expect_eq "sign: a checkout whose path holds a quote and a space" "$(stamped "$T/it's a checkout/$R/stamp" "$T/pub.pem")" "yes"
 sign_here='here=$(dirname "$0")'
 sign_pub='PUB=$here/../keys/legotypes-pkg-signing.pub'
 sign_trusted='TRUSTED=$here/../vendor/legotypes/src/etc/pkg/fingerprints/LegoTypes/trusted'
@@ -1164,7 +1197,7 @@ signdir os-alpha-1.1.pkg
 rm -f "$T/pkgtool/calls"
 sg "PKG=$T/pkgtool/sbin/pkg" STUB_PKG_REFUSE=1 >/dev/null
 expect_eq "sign: PKG= is the pkg that signs and lists the catalogue" "$(sort -u "$T/pkgtool/calls" | tr '\n' ' ')" "info repo "
-expect_eq "sign: signed with PKG=" "$(stamped "$W/$R" "$T/pub.pem") $(cat "$W/$R/meta.conf")" "yes version = 2;"
+expect_eq "sign: signed with PKG=" "$(stamped "$W/$R/stamp" "$T/pub.pem") $(cat "$W/$R/meta.conf")" "yes version = 2;"
 signdir os-alpha-1.1.pkg
 expect_fail "sign: a PKG= that is not there" sg "PKG=$T/pkgtool/sbin/none"
 cp "$T/pkgtool/sbin/pkg" "$T/pkgtool/sbin/pkg.noexec"
@@ -1180,7 +1213,9 @@ expect_eq "sign: a frozen tree is signed too" "$(cat "$W/site/FreeBSD:15:amd64/2
 expect_eq "sign: a frozen tree may lack a package" "$(grep -c '^Name' "$W/site/FreeBSD:15:amd64/26.1/latest/packages.txt" 2>/dev/null)" "1"
 expect_eq "sign: a frozen tree has its own stamp" "$(fields "$W/site/FreeBSD:15:amd64/26.1/latest/stamp" 2>/dev/null)" \
 	$'published: <UTC>\nrun: 4815162342\ntree: FreeBSD:15:amd64/26.1'
-expect_eq "sign: the frozen tree's stamp verifies" "$(stamped "$W/site/FreeBSD:15:amd64/26.1/latest" "$T/pub.pem")" "yes"
+expect_eq "sign: the frozen tree's stamp verifies" "$(stamped "$W/site/FreeBSD:15:amd64/26.1/latest/stamp" "$T/pub.pem")" "yes"
+expect_eq "sign: the frozen tree's stamp is one file too" \
+	"$(exists "$W/site/FreeBSD:15:amd64/26.1/latest/stamp.sig") $(exists "$W/site/FreeBSD:15:amd64/26.1/latest/stamp.pub")" "no no"
 expect_eq "sign: one publication time for every tree" "$(sed -n 1p "$W/$R/stamp")" \
 	"$(sed -n 1p "$W/site/FreeBSD:15:amd64/26.1/latest/stamp" 2>/dev/null)"
 expect_eq "sign: no archive of either tree holds a private key" "$(keyscan)" "4 0"
@@ -1200,6 +1235,86 @@ echo "old" >"$W/site/FreeBSD:15:amd64/26.1/latest/All/os-alpha-1.0.pkg"
 sg >/dev/null
 expect_eq "sign: the root keeps the target tree" "$(grep '^Name' "$W/site/packages.txt" | tr '\n' ' ')" \
 	"Name : os-alpha-1.1 Name : os-legotypes-1.0_2 "
+
+# --- stamp-check.sh: the stamp's format, its key and its signature, as sign-catalogue.sh and
+# verify-catalogue.sh check it ----------------------------------------------------------------
+stc() { sh "$S/stamp-check.sh" "$@"; }
+# stbody <file> <line>...: a stamp body of those lines (each LF-terminated), the test key after them
+stbody() {
+	local f=$1
+	shift
+	{ printf '%s\n' "$@"; cat "$T/pub.pem"; } >"$f"
+}
+# stfail <name> <stamp>: stamp-check.sh refuses <stamp> as not a stamp (the format), whatever its signature
+stfail() {
+	local err
+	if err=$(stc "$2" "$T/pub.pem" FreeBSD:15:amd64/26.7 2>&1 >/dev/null); then
+		bad "$1: expected failure"
+	else
+		expect_eq "$1" "$(grep -c 'is not a stamp' <<<"$err")" 1
+	fi
+}
+sb=(published:\ 2026-10-21T12:00:00Z 'run: 4815162342' 'tree: FreeBSD:15:amd64/26.7')
+mkstamp "$T/st" FreeBSD:15:amd64/26.7
+expect_eq "stamp-check: a stamp as sign-catalogue.sh writes it" "$(stc "$T/st" "$T/pub.pem" FreeBSD:15:amd64/26.7; echo "rc=$?")" \
+	$'published 2026-10-21T12:00:00Z\nrc=0'
+expect_fail "stamp-check: another tree" stc "$T/st" "$T/pub.pem" FreeBSD:15:amd64/26.1
+expect_fail "stamp-check: another key than the one given" stc "$T/st" "$T/other.pub" FreeBSD:15:amd64/26.7
+expect_fail "stamp-check: usage" stc "$T/st" "$T/pub.pem"
+mkstamp "$T/st2" FreeBSD:15:amd64/26.7 "$T/other.pem"
+expect_eq "stamp-check: a signature by another key" \
+	"$(stc "$T/st2" "$T/pub.pem" FreeBSD:15:amd64/26.7 2>&1 >/dev/null | grep -c 'signature does not verify')" 1
+mkstamp "$T/st2" FreeBSD:15:amd64/26.7 "$T/other.pem" "$T/other.pub"
+expect_eq "stamp-check: signed and keyed by another key" \
+	"$(stc "$T/st2" "$T/pub.pem" FreeBSD:15:amd64/26.7 2>&1 >/dev/null | grep -c 'carries a key other than')" 1
+sed 's/^run: .*/run: 4815162343/' "$T/st" >"$T/st2"
+expect_eq "stamp-check: a body edited after signing" \
+	"$(stc "$T/st2" "$T/pub.pem" FreeBSD:15:amd64/26.7 2>&1 >/dev/null | grep -c 'signature does not verify')" 1
+# the format: every field once, in order, one key block, the signature line last, LF and printable ASCII only
+stbody "$T/sb" "${sb[0]}" "${sb[2]}" && signbody "$T/sb" "$T/st2"
+stfail "stamp-check: a field missing" "$T/st2"
+stbody "$T/sb" "${sb[@]}" "${sb[2]}" && signbody "$T/sb" "$T/st2"
+stfail "stamp-check: a field twice" "$T/st2"
+stbody "$T/sb" "${sb[1]}" "${sb[0]}" "${sb[2]}" && signbody "$T/sb" "$T/st2"
+stfail "stamp-check: the fields out of order" "$T/st2"
+stbody "$T/sb" 'published: 2026-10-21 12:00:00' "${sb[1]}" "${sb[2]}" && signbody "$T/sb" "$T/st2"
+stfail "stamp-check: a time that is not UTC ISO-8601" "$T/st2"
+stbody "$T/sb" "${sb[0]}" 'run: 48x5' "${sb[2]}" && signbody "$T/sb" "$T/st2"
+stfail "stamp-check: a run that is not digits" "$T/st2"
+stbody "$T/sb" "${sb[0]}" "${sb[1]}" 'tree: ' && signbody "$T/sb" "$T/st2"
+stfail "stamp-check: an empty tree" "$T/st2"
+stbody "$T/sb" "${sb[@]}" && cat "$T/pub.pem" >>"$T/sb" && signbody "$T/sb" "$T/st2"
+stfail "stamp-check: two key blocks" "$T/st2"
+printf '%s\n' "${sb[@]}" >"$T/sb" && signbody "$T/sb" "$T/st2"
+stfail "stamp-check: no key block" "$T/st2"
+{ printf '%s\n' "${sb[@]}" '-----BEGIN PUBLIC KEY-----' '-----END PUBLIC KEY-----'; } >"$T/sb" && signbody "$T/sb" "$T/st2"
+stfail "stamp-check: an empty key block" "$T/st2"
+{ printf '%s\n' "${sb[@]}"; awk 'NR == 2 { printf "%s", $0; next } { print }' "$T/pub.pem"; } >"$T/sb" && signbody "$T/sb" "$T/st2"
+stfail "stamp-check: a key line over 64 characters" "$T/st2"
+{ cat "$T/st"; echo 'note: hello'; } >"$T/st2"
+stfail "stamp-check: a line after the signature" "$T/st2"
+{ cat "$T/st"; sed -n '$p' "$T/st"; } >"$T/st2"
+stfail "stamp-check: a second signature line" "$T/st2"
+head -c "$(($(wc -c <"$T/st") - 1))" "$T/st" >"$T/st2"
+stfail "stamp-check: no final newline" "$T/st2"
+stbody "$T/sb" "${sb[@]}" && perl -pe 's/\n/\r\n/' "$T/sb" >"$T/sb.crlf" && signbody "$T/sb.crlf" "$T/st2"
+expect_eq "stamp-check: CR line ends, refused byte by byte" \
+	"$(stc "$T/st2" "$T/pub.pem" FreeBSD:15:amd64/26.7 2>&1 >/dev/null | grep -c 'is not a stamp: a byte other than printable ASCII and LF')" 1
+stbody "$T/sb" "${sb[0]}" "${sb[1]}" $'tree: FreeBSD:15:amd64/26.7\303\251' && signbody "$T/sb" "$T/st2"
+expect_eq "stamp-check: a byte beyond ASCII, refused byte by byte" \
+	"$(stc "$T/st2" "$T/pub.pem" FreeBSD:15:amd64/26.7 2>&1 >/dev/null | grep -c 'is not a stamp: a byte other than printable ASCII and LF')" 1
+stbody "$T/sb" "${sb[0]}" $'run:\t4815162342' "${sb[2]}" && signbody "$T/sb" "$T/st2"
+expect_eq "stamp-check: a tab, refused byte by byte" \
+	"$(stc "$T/st2" "$T/pub.pem" FreeBSD:15:amd64/26.7 2>&1 >/dev/null | grep -c 'is not a stamp: a byte other than printable ASCII and LF')" 1
+{ sed '$d' "$T/st"; echo 'signature: not*base64'; } >"$T/st2"
+stfail "stamp-check: a signature that is not base64" "$T/st2"
+{ sed '$d' "$T/st"; echo 'signature: '; } >"$T/st2"
+stfail "stamp-check: an empty signature" "$T/st2"
+: >"$T/st2"
+stfail "stamp-check: an empty file" "$T/st2"
+{ cat "$T/st"; head -c 66000 /dev/zero | tr '\0' 'A'; echo; } >"$T/st2"
+expect_eq "stamp-check: a file over 64 KiB" \
+	"$(stc "$T/st2" "$T/pub.pem" FreeBSD:15:amd64/26.7 2>&1 >/dev/null | grep -c 'over 65536 bytes')" 1
 
 # --- upstream.sh (stub curl serves a fake mirror) -----------------------------
 # mirror <series...>: a fake OPNsense mirror with those series under FreeBSD:15:amd64; the root
@@ -2067,14 +2182,8 @@ echo "catalogue data" >"$T/data"
 openssl dgst -sha256 -r "$T/data" | cut -d' ' -f1 | tr -d '\n' | openssl dgst -sha256 -sign "$T/key.pem" -binary >"$T/data.sig"
 cp "$T/pub.pem" "$T/data.pub"
 tar -cf "$d/data.pkg" -C "$T" data data.sig data.pub
-# vstamp <tree dir> <ABI/series> [<signing key> [<published key>]]: the tree's stamp as sign-catalogue.sh
-# writes it, signed by the test key (or <signing key>), its key the published one (or <published key>)
-vstamp() {
-	printf 'published: 2026-10-21T12:00:00Z\nrun: 4815162342\ntree: %s\n' "$2" >"$1/stamp"
-	openssl dgst -sha256 -r "$1/stamp" | cut -d' ' -f1 | tr -d '\n' |
-		openssl dgst -sha256 -sign "${3:-$T/key.pem}" -binary >"$1/stamp.sig"
-	cp "${4:-$T/pub.pem}" "$1/stamp.pub"
-}
+# vstamp <tree dir> <ABI/series> [<signing key> [<embedded key>]]: the tree's stamp (mkstamp)
+vstamp() { mkstamp "$1/stamp" "${@:2}"; }
 vstamp "$d" FreeBSD:15:amd64/26.7
 # the published key is the script's own checkout's; the harness copy names the test key instead
 expect_eq "verify-catalogue.sh: the published key from the script's location, one literal line, no override" \
@@ -2085,11 +2194,14 @@ expect_eq "verify: a good publish" "$(vc os-alpha >/dev/null; echo "rc=$?")" "rc
 expect_eq "verify: the stamp is reported" "$(vc os-alpha 2>/dev/null | grep -c '^FreeBSD:15:amd64/26.7: stamp verified, published 2026-10-21T12:00:00Z$')" 1
 expect_fail "verify: PUB_KEY changes nothing (the real key did not sign this catalogue)" \
 	env PUB_KEY="$T/pub.pem" bash "$root/scripts/verify-catalogue.sh" os-alpha
-for f in stamp stamp.sig stamp.pub; do
-	mv "$d/$f" "$T/$f.away"
-	expect_fail "verify: a tree without its $f" vc os-alpha
-	mv "$T/$f.away" "$d/$f"
-done
+mv "$d/stamp" "$T/stamp.away"
+expect_fail "verify: a tree without its stamp" vc os-alpha
+mv "$T/stamp.away" "$d/stamp"
+printf 'published: 2026-10-21T12:00:00Z\nrun: 4815162342\ntree: FreeBSD:15:amd64/26.7\n' >"$T/oldstamp.body"
+signbody "$T/oldstamp.body" "$T/oldstamp"
+cp "$T/oldstamp" "$d/stamp"
+expect_fail "verify: a stamp without its key block (the three-file format)" vc os-alpha
+vstamp "$d" FreeBSD:15:amd64/26.7
 vstamp "$d" FreeBSD:15:amd64/26.7 "$T/other.pem"
 expect_fail "verify: a stamp signed by another key" vc os-alpha
 vstamp "$d" FreeBSD:15:amd64/26.7 "$T/other.pem" "$T/other.pub"
@@ -2584,7 +2696,7 @@ expect_fail "summary: usage" bash "$root/scripts/summary.sh" os-alpha "$so"
 # after the shebang; no header anywhere names anyone else
 for f in scripts/carry-plan.sh scripts/manifest.sh scripts/out-dir.sh scripts/payload.sh scripts/pkg-tool.sh \
 	scripts/plugin-source.sh scripts/provenance.sh scripts/review-sums.sh scripts/summary.sh scripts/ubuntu-apt.sh \
-	scripts/verify-payload.sh tests/stub-apt/apt-get; do
+	scripts/verify-payload.sh scripts/stamp-check.sh tests/stub-apt/apt-get; do
 	expect_eq "$f: the copyright line after the shebang" "$(sed -n 2p "$root/$f")" "# Copyright (C) 2026 cayossarian"
 done
 expect_eq "every copyright header names cayossarian alone" \

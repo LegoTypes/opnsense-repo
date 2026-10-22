@@ -4,21 +4,27 @@
 # one tree served, the target holds one package per catalogue row; while two are
 # served, the target and a frozen tree each hold at most one, the target always the
 # built package), sign each with .signing/key (removed on exit, whatever happens),
-# verify both signatures of each against keys/legotypes-pkg-signing.pub, stamp each,
-# write each tree's packages.txt, and only then write the rest of the Pages site from
+# verify both signatures of each against keys/legotypes-pkg-signing.pub, stamp each and
+# check the stamp with stamp-check.sh as os-legotypes checks it, write each tree's
+# packages.txt, and only then write the rest of the Pages site from
 # the target tree: the public key and packages.txt. The site root serves no package:
 # os-legotypes installs from the signed repository.
 #
 # The stamp: a pkg catalogue carries no date, so a replayed old one verifies like a new
-# one. Each tree gets, beside data.pkg and packagesite.pkg, "stamp" (three lines:
-# "published: <UTC ISO-8601>", one time for the whole run, "run: <GITHUB_RUN_ID>",
-# "tree: <ABI>/<series>"), "stamp.sig" (the signing command's signature over the
-# stamp's sha256 hex, exactly as pkg has it sign a catalogue file) and "stamp.pub" (the
-# published key). os-legotypes checks sha256(stamp.pub) against its trusted
-# fingerprints and then
-#   openssl dgst -sha256 -r stamp | cut -d' ' -f1 | tr -d '\n' |
-#     openssl dgst -sha256 -verify stamp.pub -signature stamp.sig
-# which is what is checked here right after each stamp is written.
+# one. Each tree gets, beside data.pkg and packagesite.pkg, ONE file "stamp", which the
+# Pages CDN caches whole (it caches each file on its own, so two files could come from
+# two deploys). Its lines, each LF-terminated, printable ASCII:
+#   published: <YYYY-MM-DDTHH:MM:SSZ>   one UTC time for the whole run
+#   run: <GITHUB_RUN_ID>
+#   tree: <ABI>/<series>
+#   -----BEGIN PUBLIC KEY-----          keys/legotypes-pkg-signing.pub, byte for byte:
+#   ...                                 os-legotypes checks its sha256 against its
+#   -----END PUBLIC KEY-----            trusted fingerprints
+#   signature: <base64>                 last, nothing after it
+# The signature is the signing command's, over the sha256 hex of every byte before the
+# signature line, exactly as pkg has it sign a catalogue file. stamp-check.sh beside this
+# script holds the full grammar and checks each stamp the moment it is written, as
+# os-legotypes will.
 #
 # What signs and what is checked is this script's own checkout's, found from its location and
 # never from the working directory or the environment: the published key
@@ -51,7 +57,7 @@ die() {
 # signal (a cancelled job) exits through the EXIT trap, which dash skips on a signal
 # that is not trapped
 unstage() {
-	/bin/rm -f .signing/key .signing/sign.sh .signing/sig
+	/bin/rm -f .signing/key .signing/sign.sh .signing/sig .signing/stamp
 }
 trap unstage EXIT
 trap 'exit 1' HUP INT TERM
@@ -111,23 +117,32 @@ printf '%s\n' '#!/bin/sh' 'set -e' 'IFS= read -r sum' \
 	'echo CERT' "cat '$qpub'" 'echo END' >.signing/sign.sh
 
 # verify <file> <signature> <key>: the signature over the file's sha256 hex verifies
-# with the key, as clients check a catalogue file and the stamp
+# with the key, as clients check a catalogue file
 verify() {
 	openssl dgst -sha256 -r "$1" | cut -d' ' -f1 | tr -d '\n' |
 		openssl dgst -sha256 -verify "$3" -signature "$2" >/dev/null
 }
 
-# stamp <tree dir> <ABI/series>: write the tree's stamp, have the signing command sign
-# it as pkg has it sign a catalogue file, and check it as os-legotypes will. The
-# signature is .signing/sig, the bytes the command answers between SIGNATURE and CERT.
+# stamp <tree dir> <ABI/series>: write the tree's stamp: its body and the published key,
+# signed by the signing command as pkg has it sign a catalogue file (the signature is
+# .signing/sig, the bytes the command answers between SIGNATURE and CERT), then the
+# signature line; then check it as os-legotypes will (stamp-check.sh). The body is put
+# together in .signing/, never under site/.
 stamp() {
-	printf 'published: %s\nrun: %s\ntree: %s\n' "$published" "$run" "$2" >"$1/stamp"
-	openssl dgst -sha256 -r "$1/stamp" | cut -d' ' -f1 | /bin/sh .signing/sign.sh >/dev/null ||
+	{
+		printf 'published: %s\nrun: %s\ntree: %s\n' "$published" "$run" "$2"
+		cat "$PUB"
+	} >.signing/stamp
+	openssl dgst -sha256 -r .signing/stamp | cut -d' ' -f1 | /bin/sh .signing/sign.sh >/dev/null ||
 		die "the signing command failed for $1/stamp"
-	cp .signing/sig "$1/stamp.sig"
-	cp "$PUB" "$1/stamp.pub"
-	verify "$1/stamp" "$1/stamp.sig" "$1/stamp.pub" ||
-		die "the signature of $1/stamp does not verify with $PUB"
+	sig=$(openssl base64 -A <.signing/sig) || die "cannot encode the signature of $1/stamp"
+	{
+		cat .signing/stamp
+		printf 'signature: %s\n' "$sig"
+	} >"$1/stamp"
+	/bin/rm -f .signing/stamp
+	sh "$here/stamp-check.sh" "$1/stamp" "$PUB" "$2" >/dev/null ||
+		die "$1/stamp is not a stamp that verifies with $PUB"
 }
 
 for entry in $served; do

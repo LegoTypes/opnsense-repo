@@ -44,10 +44,11 @@ A bad release is replaced by publishing a newer version: pkg never downgrades.
 The workflows run the scripts in [`scripts/`](scripts); `bash tests/run.sh` tests them with stand-ins for `gh`, `git`, `make`, `pkg`, `curl` and `apt-get`.
 
 After a publish, `bash scripts/verify-catalogue.sh <package>` checks what firewalls will check: every served
-catalogue's signature, every served tree's stamp (there, signed by the published key, carrying that key and naming
-that tree), that the target series serves the package's newest release, and that the release asset matches its
-notes. Straight after a deploy, Pages may still serve some files of the previous deploy for up to 10 minutes: a
-failure then can clear by itself, so run it again after 10 minutes before acting on it.
+catalogue's signature, every served tree's stamp (`scripts/stamp-check.sh`: one file in its format, signed by the
+published key, carrying that key and naming that tree), that the target series serves the package's newest release,
+and that the release asset matches its notes. Straight after a deploy, Pages may still serve the previous deploy's
+`packages.txt` for up to 10 minutes: a "serves ... its newest release is ..." failure then clears by itself, so run
+it again after 10 minutes before acting on it.
 
 ## The canary
 
@@ -88,18 +89,18 @@ The canary never publishes. A finding is acted on by a person:
    - Upgrades go through `opnsense upgrade-legotypes [package]`.
    - On the firewall, `configctl legotypes check` (Monit runs it every cycle as `legotypes_runtime`) says whether
      every LegoTypes package and the repository config fit the firewall's series and ABI, then reads the
-     repository's signed catalogue stamp (`stamp`, `stamp.sig`, `stamp.pub` beside the catalogue). It prints one
-     line per finding and exits 1 on any MISMATCH, which Monit alerts on (and again when it clears):
+     repository's signed catalogue stamp: one file, `stamp` beside the catalogue, holding the date, the run, the
+     tree, the published key and a signature over all of them (its format is in `scripts/stamp-check.sh`). One file
+     is cached whole by Pages, so a deploy can never be read half old and half new. It prints one line per finding
+     and exits 1 on any MISMATCH, which Monit alerts on (and again when it clears):
      - **INFO** `catalogue published <UTC time> (<n> days ago)`: the stamp is valid, signed by a trusted LegoTypes
        key; the date says how fresh the catalogue is, as a pkg catalogue carries none.
      - **INFO**, no alert: an update available; a hand-installed package; the site cannot be reached or answers
        5xx (`could not fetch the stamp`); a stamp dated ahead of the firewall's clock.
      - **MISMATCH**, alert: a package or the repository config that does not fit the series or ABI; a site that
-       answers without a valid stamp: a 404 (or any answer but 200 and 5xx) for a stamp file, a stamp file over
-       64 KiB, a `stamp.pub` that is no trusted fingerprint, a signature that does not verify (a forged or replaced
-       stamp), a malformed stamp, a stamp for another tree. A signature that does not verify is fetched once more
-       first, so a deploy landing between the fetches does not alert; Pages' 10-minute cache can still show a
-       mismatch for a few minutes after a publish, which clears by itself.
+       answers without a valid stamp: a 404 (or any answer but 200 and 5xx) for the stamp, a stamp over 64 KiB, a
+       malformed stamp, a key in it that is no trusted fingerprint, a signature that does not verify (a forged or
+       edited stamp), a stamp for another tree.
      - `LegoTypes packages fit series <series> on <ABI>` closes the output only when there is no MISMATCH at all.
 6. **A new plugin** needs:
    - a `packages.conf` row;
