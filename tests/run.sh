@@ -2580,6 +2580,11 @@ expect_eq "constants: listings that cannot be read" "$(ccs)" \
 	$'MATERIAL: cannot read Templates/ of opnsense/plugins master: its copies were not compared\nMATERIAL: cannot read Keywords/ of LegoTypes/plugins master: its copies were not compared\nrc=1'
 reset_stub
 expect_eq "constants: usage" "$(bash "$S/canary-constants.sh" x 2>/dev/null; echo "rc=$?")" "rc=2"
+# an unexpected failure (here mktemp, as on a full disk) exits 2, never 1 without a finding
+mkdir -p "$T/failshim"
+printf '#!/bin/sh\nexit 1\n' >"$T/failshim/mktemp"
+chmod 755 "$T/failshim/mktemp"
+expect_eq "constants: a command that fails unexpectedly" "$(PATH="$T/failshim:$PATH" bash "$S/canary-constants.sh" 2>/dev/null; echo "rc=$?")" "rc=2"
 
 # --- canary-vm.sh and canary.sh --------------------------------------------------
 conf 'os-alpha  Org/plugins br net/alpha yes' \
@@ -2630,6 +2635,16 @@ rm "$STUB/contents/LegoTypes/plugins/Keywords"
 canary_run >/dev/null
 expect_eq "canary: a listing that cannot be read is reported in the series issue" \
 	"$(grep -c "cannot read Keywords/ of LegoTypes/plugins master" "$STUB/issue_calls")" "1"
+# canary-constants.sh exiting 1 with no MATERIAL line (or 2) never reads as clean: the series issue says so
+cp "$S/canary-constants.sh" "$T/constants.saved"
+for code in 1 2; do
+	printf '#!/bin/sh\nexit %s\n' "$code" >"$S/canary-constants.sh"
+	reset_stub
+	out=$(canary_run)
+	expect_eq "canary: canary-constants.sh exiting $code with no finding opens the series issue" \
+		"$(tail -n 1 <<<"$out") $(grep -c "copies of Templates/ and Keywords/ could not be compared (exit $code)" "$STUB/issue_calls")" "opened 1"
+done
+cp "$T/constants.saved" "$S/canary-constants.sh"
 rm "$cw/upstream.env"
 expect_fail "canary: refuses to run without upstream facts" canary_run
 
@@ -2891,6 +2906,8 @@ expect_fail "plugin-source: a commit the repository does not have" ps "$T" "$(pr
 rm -rf "$T/src"
 expect_fail "plugin-source: an abbreviated commit" ps "$T" "${c_one:0:9}" os-alpha "$T/src"
 expect_fail "plugin-source: usage" ps "$T" "$c_one" os-alpha
+# this repository's package: the directory as the commit's tree holds it, exported into <dest>, never the
+# working tree (where the build's artifact is unpacked)
 freshrepo
 mkdir -p "$T/fresh/vendor/v/src/etc"
 printf '#!/bin/sh\necho run\n' >"$T/fresh/vendor/v/src/run.sh"

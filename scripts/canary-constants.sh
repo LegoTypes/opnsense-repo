@@ -9,10 +9,11 @@
 # missing, is not a file or is not in the form modelled, for a file master adds (Templates/version aside:
 # verify-payload.sh renders the version file itself), and for anything that cannot be read; nothing when all
 # agree. Nothing read from upstream goes into the lines but plain file names. Exits 1 if it printed anything,
-# 2 if it cannot run. A difference fails no publish; a package built from a changed file fails the payload
+# 2 if it cannot run, any command failing unexpectedly included (the ERR trap: never 1 without a line). A difference fails no publish; a package built from a changed file fails the payload
 # check until the copy is changed in a reviewed commit (README: The canary).
 # gh takes the token from GH_TOKEN.
-set -euo pipefail
+set -eEuo pipefail
+trap 'exit 2' ERR
 
 here=$(cd "$(dirname "$0")" && pwd)
 die() {

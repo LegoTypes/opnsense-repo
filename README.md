@@ -21,7 +21,7 @@ The plugins, what they do and how to install them: <https://legotypes.github.io>
 3. The `build` job builds exactly that commit in FreeBSD 15 and uploads the package; it holds no secret and names no environment, and nothing it does after the VM is trusted. The `review` job then runs on a runner of its own, with this repository's scripts and GitHub's actions only: it writes the release notes' source and build lines itself (the commit and the plugin source, `repo.conf` and OPNsense's mirror, never the VM's lines), checks the version is new, and ends with a summary on the run's page, **build / review summary**. Read it before approving:
    - the commit, the built file with its sha256, and the source line its release notes will start with;
    - the manifest: every release that will be carried forward, with the sha256 its notes record and whether it is immutable;
-   - the payload check: whether the package holds exactly what the plugin source at the commit installs. That covers the install scripts: `verify-payload.sh` derives them from the plugin directory at the commit, as `Mk/plugins.mk` and `pkg create` make them, from its own reviewed copies of `opnsense/plugins`' `Templates/` and `Keywords/`, and refuses a package whose scripts differ by one byte (`scripts: derived from the source, identical (<n>)`). Their text is in a collapsed section for reference; there is nothing in it to review. With files, manifest, annotations and scripts all derived, what the build VM chooses is down to each file's mtime and the FreeBSD minor version in the `FreeBSD_version` annotation: it can change nothing a firewall installs or runs;
+   - the payload check: whether the package holds exactly what the plugin source at the commit installs. That covers the install scripts: `verify-payload.sh` derives them from the plugin directory at the commit, as `Mk/plugins.mk` and `pkg create` make them, from its own reviewed copies of `opnsense/plugins`' `Templates/` and `Keywords/`, and refuses a package whose scripts differ by one byte (`scripts: derived from the source, identical (<n>)`). Their text is in a collapsed section for reference; there is nothing in it to review. With files, manifest, annotations and scripts all derived, what the build VM chooses is down to each file's mtime, the FreeBSD minor version in the `FreeBSD_version` annotation, and the order of the `@sample`/`@shadow` expansions within a script, each of which is derived (the plist is its own `sort`); besides those, only how the archive is packed (member order, compression, the sum's kind), which changes no content;
    - the material differences from the package's newest release (`compare-package.sh`, as the canary reports them);
    - the version file the package installs, and the release notes' build lines (the FreeBSD version as the build VM reported it).
 
@@ -76,7 +76,11 @@ The canary never publishes. A finding is acted on by a person:
   copy in `verify-payload.sh` in a reviewed commit: a template whole, a keyword's flags and script bodies only,
   never its comment header. Change how they are used along with them (`Mk/plugins.mk`'s scripts and plist
   targets, `pkg create`), update the copies tests and fixtures in `tests/run.sh` (a template's blob id, the
-  master-shaped keyword fixtures), and run the tests.
+  master-shaped keyword fixtures), and run the tests. Then rebase every plugin branch on the fork's master
+  carrying the new `Templates/` and `Keywords/` before its next publish: a plugin row builds with its own
+  branch's copies of them, so a branch still holding the old ones builds a package whose scripts differ from
+  what `verify-payload.sh` now derives, and that publish fails the payload check. The `.` row builds in the
+  fork's master and follows it at once.
 
 ## Developing a plugin
 

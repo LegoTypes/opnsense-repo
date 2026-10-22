@@ -62,9 +62,11 @@ series=$(sh "$here/repo.sh" series)
 		echo "MATERIAL: OPNsense now publishes $next; this repository targets $(sh "$here/repo.sh" abi) (README: Series change)"
 	fi
 	# the Templates/ and Keywords/ copies verify-payload.sh derives the install scripts from, against both masters
+	# an exit without a MATERIAL line is never clean: it could not compare
 	rc=0
-	bash "$here/canary-constants.sh" || rc=$?
-	if ((rc > 1)); then
+	constants=$(bash "$here/canary-constants.sh") || rc=$?
+	[[ -z $constants ]] || printf '%s\n' "$constants"
+	if ((rc > 1)) || { ((rc == 1)) && ! grep -q '^MATERIAL: ' <<<"$constants"; }; then
 		echo "MATERIAL: verify-payload.sh's copies of Templates/ and Keywords/ could not be compared (exit $rc)"
 	fi
 	printf '%s\n' "$facts"

@@ -34,7 +34,8 @@
 #    trusted gives, so dependencies wait until they are derived from the verified upstream
 #    catalogue, spec -01 §3.3); scripts only under pkg's script names, printable ASCII,
 #    tab and newline, no %-escape but %25 (pkg url-decodes scripts). Not derivable, so not
-#    compared: each file's mtime, and FreeBSD_version beyond its major (step 2).
+#    compared: each file's mtime, FreeBSD_version beyond its major (step 2), and the order of the @sample and
+#    @shadow expansions within a script, each of which is derived (step 5: the plist is the VM's sort).
 # 2. The version file: no key repeated, exactly the derived ten values; the
 #    annotations repeat it, and add FreeBSD_version: all digits, of the ABI's major.
 # 3. The files: +MANIFEST's map one to one onto src/, each entry exactly the keys
