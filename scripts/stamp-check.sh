@@ -11,7 +11,9 @@
 # caches each file on its own can never serve parts of two deploys. At most 65536 bytes of
 # printable ASCII and LF (no CR, tab or byte beyond ASCII), every line LF-terminated, and
 # exactly these lines in this order:
-#   published: <YYYY-MM-DDTHH:MM:SSZ>   the publication time, UTC
+#   published: <YYYY-MM-DDTHH:MM:SSZ>   the publication time, UTC: a real date (the
+#                                       Gregorian calendar, leap years included) and
+#                                       time of day (00-23, 00-59, 00-59)
 #   run: <digits>                       the workflow run that signed it
 #   tree: <printable, no space>         <ABI>/<series>, the tree it stamps
 #   -----BEGIN PUBLIC KEY-----          the published key, byte for byte as
@@ -23,8 +25,10 @@
 # before the signature line, exactly as pkg has it sign a catalogue file:
 #   <the lines before the signature line> | openssl dgst -sha256 -r | cut -d' ' -f1 |
 #     tr -d '\n' | openssl dgst -sha256 -verify <key> -signature <the decoded signature>
-# A field missing, repeated or out of order, a second key block, anything after the
-# signature line, a CR or a byte beyond ASCII, or a size over the cap: not a stamp.
+# A field missing, repeated or out of order, a date or time that does not exist, a second
+# key block, anything after the signature line, a CR or a byte beyond ASCII, or a size over
+# the cap: not a stamp. lib.php's grammar and date check are the same, tested on one list
+# of dates (vendor/legotypes/tests/stamp-dates.txt).
 # Runs under dash and macOS's sh, with what /usr/bin and /bin hold (sign-catalogue.sh runs
 # it so): awk, grep, head, sed, tail, od, wc, cmp, mktemp, openssl.
 set -eu
@@ -46,7 +50,18 @@ fi
 # the lines, in order; prints the number of the signature line
 n=$(LC_ALL=C awk '
 	function bad() { failed = 1; exit 1 }
-	NR == 1 { if ($0 !~ "^published: [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$") bad(); next }
+	NR == 1 {
+		if ($0 !~ "^published: [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$") bad()
+		# a real UTC time, as the round trip in lib.php (DateTimeImmutable) demands: the
+		# month 01-12, the day within the month (February 29 in a Gregorian leap year),
+		# 00-23 hours, 00-59 minutes and seconds
+		y = substr($0, 12, 4) + 0; m = substr($0, 17, 2) + 0; d = substr($0, 20, 2) + 0
+		mdays = substr("312831303130313130313031", 2 * m - 1, 2) + 0
+		if (m == 2 && y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) mdays = 29
+		if (m < 1 || m > 12 || d < 1 || d > mdays) bad()
+		if (substr($0, 23, 2) + 0 > 23 || substr($0, 26, 2) + 0 > 59 || substr($0, 29, 2) + 0 > 59) bad()
+		next
+	}
 	NR == 2 { if ($0 !~ "^run: [0-9]+$") bad(); next }
 	NR == 3 { if ($0 !~ "^tree: [!-~]+$") bad(); next }
 	NR == 4 { if ($0 != "-----BEGIN PUBLIC KEY-----") bad(); next }

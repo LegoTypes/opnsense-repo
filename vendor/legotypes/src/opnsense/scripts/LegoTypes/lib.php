@@ -140,7 +140,9 @@ function legotypes_fingerprints(array $trusted, array $revoked): array
  * LF (no CR, tab or byte beyond ASCII), every line LF-terminated, exactly these lines in
  * this order (the same grammar as scripts/stamp-check.sh in opnsense-repo, which checks
  * every stamp sign-catalogue.sh writes):
- *   published: <YYYY-MM-DDTHH:MM:SSZ>   the publication time, UTC
+ *   published: <YYYY-MM-DDTHH:MM:SSZ>   the publication time, UTC: a real date and time
+ *                                       (it must survive a round trip through
+ *                                       DateTimeImmutable, as stamp-check.sh checks it)
  *   run: <digits>                       the workflow run that signed it
  *   tree: <printable, no space>         <ABI>/<series>, the tree it stamps
  *   -----BEGIN PUBLIC KEY-----          the signing key, byte for byte as published
@@ -150,7 +152,8 @@ function legotypes_fingerprints(array $trusted, array $revoked): array
  *   signature: <base64, one line>       the last line; nothing follows it
  * The signature (RSA, sha256) is over the sha256 hex of every byte before the signature
  * line, as pkg has a catalogue file signed. A field missing, repeated or out of order, a
- * second key block, anything after the signature line: malformed.
+ * second key block, anything after the signature line, a date or time that does not exist:
+ * malformed (both sides are tested on one list of dates, tests/stamp-dates.txt).
  */
 const LEGOTYPES_STAMP_GRAMMAR = '/\Apublished: ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)\n'
     . 'run: [0-9]+\ntree: ([!-~]+)\n'

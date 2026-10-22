@@ -1279,6 +1279,20 @@ stbody "$T/sb" "${sb[1]}" "${sb[0]}" "${sb[2]}" && signbody "$T/sb" "$T/st2"
 stfail "stamp-check: the fields out of order" "$T/st2"
 stbody "$T/sb" 'published: 2026-10-21 12:00:00' "${sb[1]}" "${sb[2]}" && signbody "$T/sb" "$T/st2"
 stfail "stamp-check: a time that is not UTC ISO-8601" "$T/st2"
+# a real date and time of day, as lib.php's round trip demands: the same list for both sides
+# (vendor/legotypes/tests/stamp-dates.txt, which tests/test_lib.php reads too)
+judged=''
+while read -r want when; do
+	[[ $want == valid || $want == invalid ]] || continue
+	stbody "$T/sb" "published: $when" "${sb[1]}" "${sb[2]}" && signbody "$T/sb" "$T/st2"
+	if stc "$T/st2" "$T/pub.pem" FreeBSD:15:amd64/26.7 >/dev/null 2>"$T/st.err"; then got=valid
+	elif grep -q 'is not a stamp' "$T/st.err"; then got=invalid
+	else got=error; fi
+	[[ $got == "$want" ]] || judged+="$when:$got "
+done <"$root/vendor/legotypes/tests/stamp-dates.txt"
+expect_eq "stamp-check: every date in stamp-dates.txt judged as lib.php judges it" "$judged" ""
+expect_eq "stamp-check: stamp-dates.txt holds both kinds" \
+	"$(grep -c '^valid ' "$root/vendor/legotypes/tests/stamp-dates.txt") $(grep -c '^invalid ' "$root/vendor/legotypes/tests/stamp-dates.txt")" "7 15"
 stbody "$T/sb" "${sb[0]}" 'run: 48x5' "${sb[2]}" && signbody "$T/sb" "$T/st2"
 stfail "stamp-check: a run that is not digits" "$T/st2"
 stbody "$T/sb" "${sb[0]}" "${sb[1]}" 'tree: ' && signbody "$T/sb" "$T/st2"

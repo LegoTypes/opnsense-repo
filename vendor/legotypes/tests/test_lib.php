@@ -195,6 +195,21 @@ check('a stamp with a local time, not UTC',
 check('a stamp with a run that is not digits', $malformed($signed($pubd . "run: 1873x\n" . $tr . $pub)));
 check('a stamp with an empty tree', $malformed($signed($pubd . $run . "tree: \n" . $pub)));
 check('the three-file stamp (no key block, no signature line)', $malformed($sf($head, [$fpr], $at)));
+/* a real date and time of day: the same list stamp-check.sh is tested with (stamp-dates.txt) */
+$judged = [];
+foreach (file(__DIR__ . '/stamp-dates.txt', FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+    if (preg_match('/^(valid|invalid) (\S+)$/', $line, $d) !== 1) {
+        continue;
+    }
+    $r = $sf($seal("published: {$d[2]}\n" . $run . $tr . $pub, $key), [$fpr], gmmktime(0, 0, 0, 1, 1, 2200));
+    $got = $malformed($r) ? 'invalid' : ($info($r) ? 'valid' : 'other');
+    if ($got !== $d[1]) {
+        $judged[] = "{$d[2]}:{$got}";
+    }
+}
+check('every date in stamp-dates.txt judged as stamp-check.sh judges it', $judged === []);
+check('stamp-dates.txt holds both kinds', count(preg_grep('/^valid /', file(__DIR__ . '/stamp-dates.txt') ?: [])) === 7
+    && count(preg_grep('/^invalid /', file(__DIR__ . '/stamp-dates.txt') ?: [])) === 15);
 check('an empty stamp', $malformed($sf('', [$fpr], $at)));
 $r = $signed("published: 2026-10-18T17:04:05Z\nrun: 18734512345\ntree: FreeBSD:15:amd64/26.1\n" . $pub);
 check('a stamp for another tree', $mismatch($r) && str_contains($r[0][1], 'FreeBSD:15:amd64/26.1'));

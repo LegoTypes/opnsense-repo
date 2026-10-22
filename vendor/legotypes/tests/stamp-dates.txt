@@ -1,0 +1,25 @@
+# Dates for the catalogue stamp's published: line, read by tests/run.sh (stamp-check.sh) and
+# tests/test_lib.php (lib.php), so both sides judge each the same way: "valid" or "invalid", then
+# the time. Invalid: a calendar date or a time of day that does not exist.
+valid 2026-10-21T12:00:00Z
+valid 2026-01-01T00:00:00Z
+valid 2026-12-31T23:59:59Z
+valid 2024-02-29T12:00:00Z
+valid 2000-02-29T12:00:00Z
+valid 2026-04-30T12:00:00Z
+valid 2026-02-28T12:00:00Z
+invalid 2026-02-29T12:00:00Z
+invalid 2026-02-30T12:00:00Z
+invalid 1900-02-29T12:00:00Z
+invalid 2100-02-29T12:00:00Z
+invalid 2026-04-31T12:00:00Z
+invalid 2026-06-31T12:00:00Z
+invalid 2026-09-31T12:00:00Z
+invalid 2026-11-31T12:00:00Z
+invalid 2026-01-32T12:00:00Z
+invalid 2026-01-00T12:00:00Z
+invalid 2026-00-10T12:00:00Z
+invalid 2026-13-01T12:00:00Z
+invalid 2026-01-01T24:00:00Z
+invalid 2026-01-01T23:60:00Z
+invalid 2026-01-01T23:59:60Z
