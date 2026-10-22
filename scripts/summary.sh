@@ -7,8 +7,10 @@
 # its runner was tampered with); then the approved commit; the built file (<out dir>, the build job's
 # artifact), its sha256 and the source line its release notes will start with; the manifest,
 # whose carry lines the sign job must find unchanged; the payload check (payload.sh:
-# informational here, the sign job enforces it), with the install scripts as pkg will run
-# them; compare-package.sh between the package's newest release and this build, as the
+# informational here, the sign job enforces it): its verdict, which covers the install scripts
+# (derived from the source and identical, so not for the approver to read), and their text as
+# pkg will run them in a collapsed section, for reference; or, when it fails, its reason;
+# compare-package.sh between the package's newest release and this build, as the
 # canary reports it, or that there is no release yet; the version file the package installs;
 # the build lines of the release notes. The source line, the build lines and the manifest are
 # <review dir>'s, which the review job wrote (provenance.sh, manifest.sh), never the VM's.
@@ -86,12 +88,20 @@ printf 'The releases the sign job carries forward (each checked against the sha2
 fence "$(cat "$rev/manifest")"
 if ((payload_rc == 0)); then
 	printf '### Payload check: passed\n\n'
-	printf 'The package holds exactly what the plugin source at the commit installs. The install scripts, as pkg will run them:\n\n'
+	printf 'The package holds exactly what the plugin source at the commit installs, its install scripts included: they are derived from the source and identical, so nothing in them needs review.\n\n'
+	# verify-payload.sh's verdict is its first two lines; the scripts' text follows
+	fence "$(sed -n '1,2p' <<<"$payload")"
+	scripts=$(sed '1,2d' <<<"$payload")
+	if [[ -n $scripts ]]; then
+		printf '<details><summary>The install scripts as pkg will run them, for reference only: derived from the source and identical, nothing in them to review</summary>\n\n'
+		fence "$scripts"
+		printf '</details>\n\n'
+	fi
 else
 	printf '### Payload check: FAILED\n\n'
 	printf 'The sign job runs this check again and will refuse to sign this build.\n\n'
+	fence "$payload"
 fi
-fence "$payload"
 printf '### Compared with the newest release\n\n'
 if [[ -z $tag ]]; then
 	printf 'No earlier release of %s: nothing to compare.\n\n' "$pkg"

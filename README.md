@@ -21,7 +21,7 @@ The plugins, what they do and how to install them: <https://legotypes.github.io>
 3. The `build` job builds exactly that commit in FreeBSD 15 and uploads the package; it holds no secret and names no environment, and nothing it does after the VM is trusted. The `review` job then runs on a runner of its own, with this repository's scripts and GitHub's actions only: it writes the release notes' source and build lines itself (the commit and the plugin source, `repo.conf` and OPNsense's mirror, never the VM's lines), checks the version is new, and ends with a summary on the run's page, **build / review summary**. Read it before approving:
    - the commit, the built file with its sha256, and the source line its release notes will start with;
    - the manifest: every release that will be carried forward, with the sha256 its notes record and whether it is immutable;
-   - the payload check: whether the package holds exactly what the plugin source at the commit installs, and its install scripts as pkg will run them (the one part of a package not taken from `src/`);
+   - the payload check: whether the package holds exactly what the plugin source at the commit installs. That covers the install scripts: `verify-payload.sh` derives them from the plugin directory at the commit, as `Mk/plugins.mk` and `pkg create` make them, from its own reviewed copies of `opnsense/plugins`' `Templates/` and `Keywords/`, and refuses a package whose scripts differ by one byte (`scripts: derived from the source, identical (<n>)`). Their text is in a collapsed section for reference; there is nothing in it to review. With files, manifest, annotations and scripts all derived, what the build VM chooses is down to each file's mtime and the FreeBSD minor version in the `FreeBSD_version` annotation: it can change nothing a firewall installs or runs;
    - the material differences from the package's newest release (`compare-package.sh`, as the canary reports them);
    - the version file the package installs, and the release notes' build lines (the FreeBSD version as the build VM reported it).
 
@@ -112,7 +112,11 @@ The canary never publishes. A finding is acted on by a person:
    - a `PLUGIN_LICENSE`, if the Makefile sets one, of one plain word (`[A-Za-z0-9._+-]+`; unset, it is
      BSD2CLAUSE);
    - no `PLUGIN_DEPENDS` (dependencies are refused until their origin and version are derived from the verified
-     upstream catalogue).
+     upstream catalogue);
+   - install script sources, if any, only as `+PRE_INSTALL`, `+POST_INSTALL`, `+PRE_DEINSTALL` and
+     `+POST_DEINSTALL`, each alone or as `.pre` or `.post` (no other `+` file in the plugin directory): regular
+     files holding only printable ASCII, tab and newline, each ending with a newline, and none making an empty
+     script (one of blanks only).
 
 ## Series change
 

@@ -34,7 +34,7 @@
 #    trusted gives, so dependencies wait until they are derived from the verified upstream
 #    catalogue, spec -01 §3.3); scripts only under pkg's script names, printable ASCII,
 #    tab and newline, no %-escape but %25 (pkg url-decodes scripts). Not derivable, so not
-#    compared: each file's mtime; the scripts are shown to the approver.
+#    compared: each file's mtime, and FreeBSD_version beyond its major (step 2).
 # 2. The version file: no key repeated, exactly the derived ten values; the
 #    annotations repeat it, and add FreeBSD_version: all digits, of the ABI's major.
 # 3. The files: +MANIFEST's map one to one onto src/, each entry exactly the keys
@@ -46,24 +46,243 @@
 #    sum (1$ sha256 or 2$ BLAKE2b in pkg's base32) matches the content; the content
 #    equals the source after substitution (.in) and gunzip (man/); flatsize is the
 #    packaged files' size.
-# On success prints "payload: OK (<n> files)" (<n> counts the version file) and then
-# each install script as pkg will run it (url-decoded), its name on a line
-# ("script post-install:") and its lines indented by a tab; on the first problem
-# exits 1 with the reason on stderr.
+# 5. The install scripts (spec -01 §3.5): derived from the plugin directory as
+#    plugins.mk's scripts target and pkg create make them, from this script's own copies
+#    of Templates/ and Keywords/ (never the build tree's), and the package's must be
+#    exactly those: the same names, each text as pkg decodes it byte for byte (the
+#    @sample and @shadow expansions matched as a set, as the plist's order is the VM's
+#    sort). A difference fails with "script <name>: " and the first line that differs.
+# On success prints "payload: OK (<n> files)" (<n> counts the version file), then
+# "scripts: derived from the source, identical (<k>)", then each install script as pkg
+# will run it (url-decoded), its name on a line ("script post-install:") and its lines
+# indented by a tab; on the first problem exits 1 with the reason on stderr.
+# verify-payload.sh --copied [<file>] lists the files it holds copies of, or prints one;
+# verify-payload.sh --model <file> prints a keyword file as this script reads it (canary-constants.sh).
 # Not modelled, so refused: contrib/, Makefile variables other than those above
 # and PLUGIN_COMMENT and PLUGIN_LICENSE, any PLUGIN_DEPENDS, values holding $, `, " or
 # \ (make or sh would expand them) or &, = or %% (sed would not copy them
 # literally), a PLUGIN_LICENSE of more than one word, a man page with .shadow, file
 # names outside [A-Za-z0-9._+,@=~-], a .in file that is not UTF-8, and a pkg-descr
-# that is missing, a symbolic link or other than printable ASCII, tab and newline.
-# Needs bash 4, jq, bsdtar (libarchive; on Ubuntu the libarchive-tools package) with
-# zstd, sha256sum, openssl (BLAKE2b), gzip, cmp, stat (GNU or BSD).
+# that is missing, a symbolic link or other than printable ASCII, tab and newline; for the
+# scripts, what step 5 lists.
+# Needs bash 4.4, jq, bsdtar (libarchive; on Ubuntu the libarchive-tools package) with
+# zstd, sha256sum, openssl (BLAKE2b), gzip, cmp, stat (GNU or BSD), find (with -mindepth and
+# -maxdepth), sort, tr and tail.
 set -euo pipefail
 
 die() {
 	echo "verify-payload.sh: $*" >&2
 	exit 1
 }
+
+# What the install scripts are made from, copied from opnsense/plugins master (e4578ae, 2026-10-22;
+# LegoTypes/plugins master 3afd667 agrees), and only what the model uses:
+# - Templates/actions.d, configure, models, rc.loader.d and templates, each the whole file (one line), which
+#   plugins.mk's scripts-auto appends (plugins.mk:178-223, TEMPLATESDIR);
+# - of Keywords/sample.ucl and shadow.ucl, which pkg create expands for the plist's @sample and @shadow lines
+#   (PORTSDIR=the plugins tree, plugins.mk:328; libpkg pkg_ports.c external_keyword, apply_keyword_file), the
+#   flags and script bodies pkg reads, in the files' own UCL form, without their comment header.
+# They are never read from the tree the VM built in, which for the "." row is LegoTypes/plugins master at
+# whatever head the build saw: a tree whose Templates/ or Keywords/ differ builds a package this check refuses,
+# until the copies are changed in a reviewed commit. canary-constants.sh compares them each week with both
+# masters: a template byte for byte, a keyword as ucl_model reads it (--model).
+copies=(Templates/actions.d Templates/configure Templates/models Templates/rc.loader.d Templates/templates
+	Keywords/sample.ucl Keywords/shadow.ucl)
+copied() { # copied <file>: the copy of <file>
+	case $1 in
+	Templates/actions.d)
+		cat <<'EOF'
+if [ -f /usr/local/etc/rc.d/configd ]; then /usr/local/etc/rc.d/configd restart; fi
+EOF
+		;;
+	Templates/configure)
+		cat <<'EOF'
+if [ -f /usr/local/etc/rc.configure_plugins ]; then echo "Reloading plugin configuration"; /usr/local/etc/rc.configure_plugins %%ARG%%; fi
+EOF
+		;;
+	Templates/models)
+		cat <<'EOF'
+if [ -f /usr/local/opnsense/mvc/script/run_migrations.php ]; then /usr/local/opnsense/mvc/script/run_migrations.php %%ARG%%; fi
+EOF
+		;;
+	Templates/rc.loader.d)
+		cat <<'EOF'
+if [ -f /usr/local/etc/rc.configure_firmware ]; then echo "Reloading firmware configuration"; /usr/local/etc/rc.configure_firmware; fi
+EOF
+		;;
+	Templates/templates)
+		cat <<'EOF'
+if [ -f /usr/local/sbin/configctl ]; then echo -n "Reloading template %%ARG%%: "; /usr/local/sbin/configctl template reload %%ARG%%; fi
+EOF
+		;;
+	Keywords/sample.ucl)
+		cat <<'EOF'
+actions: [file(1)]
+arguments: true
+post-install: <<EOD
+  case "%1" in
+  /*) sample_file="%1" ;;
+  *) sample_file="%D/%1" ;;
+  esac
+  target_file="${sample_file%.sample}"
+  set -- %@
+  if [ $# -eq 2 ]; then
+      target_file=${2}
+  fi
+  case "${target_file}" in
+  /*) target_file="${target_file}" ;;
+  *) target_file="%D/${target_file}" ;;
+  esac
+  if ! [ -f "${target_file}" ]; then
+    /bin/cp -p "${sample_file}" "${target_file}"
+  fi
+EOD
+pre-deinstall: <<EOD
+  case "%1" in
+  /*) sample_file="%1" ;;
+  *) sample_file="%D/%1" ;;
+  esac
+  target_file="${sample_file%.sample}"
+  set -- %@
+  if [ $# -eq 2 ]; then
+      set -- %@
+      target_file=${2}
+  fi
+  case "${target_file}" in
+  /*) target_file="${target_file}" ;;
+  *) target_file="%D/${target_file}" ;;
+  esac
+  if cmp -s "${target_file}" "${sample_file}"; then
+    rm -f "${target_file}"
+  fi
+EOD
+EOF
+		;;
+	Keywords/shadow.ucl)
+		cat <<'EOF'
+actions: [file(1)]
+arguments: true
+post-install: <<EOD
+  case "%1" in
+  /*) sample_file="%1" ;;
+  *) sample_file="%D/%1" ;;
+  esac
+  target_file="${sample_file%.sample}"
+  set -- %@
+  if [ $# -eq 2 ]; then
+      target_file=${2}
+  fi
+  case "${target_file}" in
+  /*) target_file="${target_file}" ;;
+  *) target_file="%D/${target_file}" ;;
+  esac
+  if ! [ -f "${target_file}" ]; then
+    /bin/cp -p "${sample_file}" "${target_file}"
+  fi
+EOD
+pre-deinstall: <<EOD
+  case "%1" in
+  /*) sample_file="%1" ;;
+  *) sample_file="%D/%1" ;;
+  esac
+  target_file="${sample_file%.sample}"
+  set -- %@
+  if [ $# -eq 2 ]; then
+      set -- %@
+      target_file=${2}
+  fi
+  case "${target_file}" in
+  /*) target_file="${target_file}" ;;
+  *) target_file="%D/${target_file}" ;;
+  esac
+  rm -f "${target_file}"
+EOD
+EOF
+		;;
+	*) return 1 ;;
+	esac
+}
+
+ws=$' \t\n\v\f\r' # UCL_STRING_TRIM's blanks (libucl: space, tab, newline, VT, FF, CR)
+# ucl_model <text>: a keyword file's text as pkg reads it (libucl; pkg_ports.c external_keyword,
+# apply_keyword_file), in the one form modelled: comment and blank lines, "actions: [file(1)]" (the file is the
+# package's, which step 3 checks), "arguments: true" (the line becomes the arguments, and an expansion starts
+# "# args: <line>"), and a <<TERM body for each script it adds to, which libucl keeps without its last newline and
+# expands no variable in (pkg registers none). Into model_body[<script>]; anything else returns 1, the reason in
+# model_err.
+declare -A model_body=()
+model_err=''
+ucl_model() {
+	local l key='' term='' body='' nb=0 acts='' args=''
+	model_body=()
+	while IFS= read -r l; do
+		if [[ -n $term ]]; then
+			if [[ $l == "$term" ]]; then
+				if [[ -z $body || $body == *[$ws] ]]; then
+					model_err="$key's body is empty or ends in a blank, which is not modelled"
+					return 1
+				fi
+				model_body[$key]=$body term=''
+			elif [[ $l == "$term"* ]]; then
+				model_err="a line starting $term in $key's body is not modelled"
+				return 1
+			else
+				((nb == 0)) || body+=$'\n'
+				body+=$l nb=$((nb + 1))
+			fi
+			continue
+		fi
+		case $l in
+		'' | '#'*) ;;
+		'actions: [file(1)]') acts=1 ;;
+		'arguments: true') args=1 ;;
+		*)
+			if [[ ! $l =~ ^(pre-install|post-install|pre-deinstall|post-deinstall):\ \<\<([A-Z]+)$ ]]; then
+				model_err="a line other than a comment, the two flags and the script bodies is not modelled"
+				return 1
+			fi
+			key=${BASH_REMATCH[1]} term=${BASH_REMATCH[2]} body='' nb=0
+			if [[ -n ${model_body[$key]+set} ]]; then
+				model_err="$key is repeated"
+				return 1
+			fi
+			;;
+		esac
+	done <<<"$1"
+	if [[ -n $term ]]; then
+		model_err="$key's body has no end"
+		return 1
+	fi
+	if [[ -z $acts || -z $args ]]; then
+		model_err="not both actions: [file(1)] and arguments: true, which is not modelled"
+		return 1
+	fi
+}
+
+# verify-payload.sh --copied [<file>]: the files it holds copies of, one per line, or the copy of <file>;
+# verify-payload.sh --model <file>: <file>, a keyword file, as ucl_model reads it, one JSON line (the flags and
+# each script's body), or exit 1 when it is not in the form modelled
+case ${1:-} in
+--copied)
+	[[ $# -le 2 ]] || die "usage: verify-payload.sh --copied [<file>]"
+	if [[ $# -eq 1 ]]; then
+		printf '%s\n' "${copies[@]}"
+	else
+		copied "$2" || die "$2: no copy (the copies: ${copies[*]})"
+	fi
+	exit 0
+	;;
+--model)
+	[[ $# -eq 2 ]] || die "usage: verify-payload.sh --model <file>"
+	[[ -f $2 ]] || die "$2: no such file"
+	t=$(cat -- "$2" && printf x) || die "cannot read $2"
+	ucl_model "${t%x}" || die "$2: $model_err"
+	margs=()
+	for k in "${!model_body[@]}"; do margs+=(--arg "$k" "${model_body[$k]}"); done
+	jq -cnS '{actions: ["file(1)"], arguments: true, scripts: $ARGS.named}' "${margs[@]}"
+	exit 0
+	;;
+esac
 
 [[ $# -eq 7 ]] || die "usage: verify-payload.sh <pkg> <plugin dir> <name> <version> <abi> <series> <commit>"
 pkg=$1 dir=${2%/} name=$3 version=$4 abi=$5 series=$6 commit=$7
@@ -446,6 +665,250 @@ done
 v=$(jq -r '.flatsize | numbers' <<<"$M")
 [[ $v == "$flat" ]] || die "+MANIFEST flatsize is ${v:-none}, expected $flat"
 
+# 5. the install scripts, derived (spec -01 §3.5). plugins.mk's scripts target (plugins.mk:167-238) writes
+# +PRE_INSTALL, +POST_INSTALL, +PRE_DEINSTALL and +POST_DEINSTALL (PLUGIN_SCRIPTS, plugins.mk:42) from the plugin
+# directory: <script>.pre sed-substituted, the scripts-auto rules appended, <script>.post substituted and
+# appended, or <script> itself, substituted, instead of all of them. pkg create takes each file as the script
+# (pkg_create.c:568-571, pkg.c pkg_addscript), then appends what the plist's @sample and @shadow lines expand to
+# (pkg_ports.c apply_keyword_file, append_script: each with a newline; flush_script_buffer, once the plist is
+# read), and +MANIFEST stores each url-encoded, % as %25, and trimmed of blanks at both ends (pkg_manifest.c
+# urlencode, UCL_STRING_TRIM). The package must hold exactly the scripts so derived, each, as pkg decodes it,
+# byte for byte. The plist is plugins.mk's sort of its lines in the VM's locale (plugins.mk:264-282), so the
+# keyword expansions are matched as a set: each exact, each once, nothing else, after the file part, whose
+# order is fixed. find -s, which orders the scripts-auto rules' entries, sorts each directory's entries by
+# name (strcoll; a locale that collates plain names otherwise than C fails here, never passes). Not modelled,
+# so refused: any other + file in the plugin directory, a script source that is not a regular file, not
+# printable ASCII, tab and newline, or whose last line has no newline, a script derived empty (what pkg create
+# stores for one is not modelled), and directory names outside the plain set.
+plain='^[A-Za-z0-9._+,@=~-]+(/[A-Za-z0-9._+,@=~-]+)*$'
+targets=(PRE_INSTALL POST_INSTALL PRE_DEINSTALL POST_DEINSTALL)
+find "$dir" -mindepth 1 -maxdepth 1 -name '+*' -print0 >"$work/plus" || die "cannot list $dir"
+while IFS= read -r -d '' e; do
+	n=${e##*/} v=''
+	for s in "${targets[@]}"; do
+		[[ $n != "+$s" && $n != "+$s.pre" && $n != "+$s.post" ]] || v=1
+	done
+	[[ -n $v ]] || die "$n: not an install script source plugins.mk reads (+PRE_INSTALL, +POST_INSTALL, +PRE_DEINSTALL or +POST_DEINSTALL, each alone or as .pre or .post), which is not supported"
+	[[ -f $e && ! -L $e ]] || die "$n: not a regular file, which is not supported"
+done < <(LC_ALL=C sort -z "$work/plus")
+# sedded <file> <var>: <file> as plugins.mk's sed ${SED_REPLACE} writes it (the .in map above), into <var>
+# (the helpers' own variables start with _, so no caller's <var> is one of them)
+sedded() {
+	local _n=${1##*/} _t
+	if LC_ALL=C grep -q $'[^\t -~]' "$1" || [[ $(tr -d '\000' <"$1" | wc -c) -ne $(wc -c <"$1") ]]; then
+		die "$_n: not printable ASCII text, tab and newline, which is not supported"
+	fi
+	[[ ! -s $1 || -z $(tail -c 1 -- "$1") ]] || die "$_n: its last line has no newline, which is not supported"
+	_t=$(jq -Rsj --argjson m "$map" 'reduce $m[] as $r (.; split($r[0]) | join($r[1]))' "$1" && printf x) ||
+		die "cannot substitute $_n"
+	printf -v "$2" '%s' "${_t%x}"
+}
+# text <file> <var>: the copy of <file>, every byte, into <var>
+text() {
+	local _t
+	_t=$(copied "$1" && printf x) || die "no copy of $1"
+	printf -v "$2" '%s' "${_t%x}"
+}
+declare -A part=() made=()
+add() { part[$1]+=$2 made[$1]=1; } # add <script> <text>: <text> appended to the file <script>
+# entries <dir> <kind> <find arguments>...: the paths find prints in <dir> (without ./), each a plain name, in
+# find -s order (each directory's entries sorted by name, a directory's own entries right after it: paths compare
+# name by name, as if / sorted before every name character), into the array found
+entries() {
+	local d=$1 kind=$2 p
+	shift 2
+	(cd "$d" && find "$@" -print0) >"$work/entries" || die "cannot list ${d#"$dir"/}"
+	found=()
+	while IFS= read -r -d '' p; do
+		p=${p#./}
+		[[ $p =~ $plain ]] || die "${d#"$dir"/}/$p: unsupported $kind name"
+		found+=("$p")
+	done <"$work/entries"
+	((${#found[@]} == 0)) || mapfile -t found < <(printf '%s\n' "${found[@]}" | tr / '\001' | LC_ALL=C sort | tr '\001' /)
+}
+arg='%%ARG%%'
+for s in "${targets[@]}"; do
+	if [[ -e $dir/+$s.pre ]]; then sedded "$dir/+$s.pre" v && part[$s]=$v made[$s]=1; fi
+done
+# scripts-auto (plugins.mk:178-223), in its order
+sd=$dir/src
+if [[ -d $sd/etc/rc.syshook.d ]]; then
+	for k in early start; do
+		entries "$sd/etc/rc.syshook.d" file . -type f -name "*.$k"
+		for p in "${found[@]}"; do add POST_INSTALL "/usr/local/etc/rc.syshook.d/$p"$'\n'; done
+	done
+fi
+if [[ -d $sd/opnsense/service/conf/actions.d ]]; then
+	text Templates/actions.d v && add POST_INSTALL "$v"
+fi
+if [[ -d $sd/etc/rc.loader.d ]]; then
+	text Templates/rc.loader.d v && add POST_INSTALL "$v" && add POST_DEINSTALL "$v"
+fi
+if [[ -d $sd/opnsense/mvc/app/models ]]; then
+	entries "$sd/opnsense/mvc/app/models" directory . -mindepth 2 -maxdepth 2 -type d
+	text Templates/models v
+	for p in "${found[@]}"; do add POST_INSTALL "${v//"$arg"/"$p"}"; done
+	text Templates/configure v
+	for s in POST_INSTALL POST_DEINSTALL; do add "$s" "${v//"$arg"/"$s"}"; done
+fi
+if [[ -d $sd/opnsense/service/templates ]]; then
+	entries "$sd/opnsense/service/templates" directory . -mindepth 2 -maxdepth 2 -type d
+	text Templates/templates v
+	for p in "${found[@]}"; do add POST_INSTALL "${v//"$arg"/"$p"}"; done
+fi
+if [[ -d $sd/opnsense/scripts/firmware/repos ]]; then
+	entries "$sd" file opnsense/scripts/firmware/repos -type f
+	for p in "${found[@]}"; do add POST_INSTALL "/usr/local/$p"$'\n'; done
+fi
+for s in "${targets[@]}"; do
+	if [[ -e $dir/+$s.post ]]; then sedded "$dir/+$s.post" v && add "$s" "$v"; fi
+done
+for s in "${targets[@]}"; do
+	if [[ -e $dir/+$s ]]; then sedded "$dir/+$s" v && part[$s]=$v made[$s]=1; fi
+done
+
+# the keywords' bodies, from the copies, as ucl_model reads them: into kwbody[<keyword>:<script>]
+declare -A kwbody=()
+for k in sample shadow; do
+	text "Keywords/$k.ucl" v
+	ucl_model "$v" || die "the copy of Keywords/$k.ucl: $model_err"
+	for key in "${!model_body[@]}"; do kwbody[$k:$key]=${model_body[$key]}; done
+done
+# expand <body> <line>: libpkg format_exec_cmd (utils.c) for a keyword with arguments, into $expanded: "# args:
+# <line>", then <body> with %D the prefix (/usr/local, as checked), %@ the line, %# the number of arguments,
+# %1 the first, %% a %, any other %<c> kept; <line> is one plain path, so it is the one argument
+# (pkg_utils_tokenize). %F, %f and %B (the last plain plist file) are not modelled.
+expand() {
+	local in=$1 line=$2 c n
+	expanded="# args: $line"$'\n'
+	while [[ $in == *%* ]]; do
+		expanded+=${in%%\%*}
+		in=${in#*\%}
+		c=${in:0:1}
+		case $c in
+		D) expanded+=/usr/local ;;
+		%) expanded+=% ;;
+		@) expanded+=$line ;;
+		'#') expanded+='1' ;;
+		[0-9])
+			n=${in%%[!0-9]*}
+			[[ $n == 1 ]] || die "a keyword's %$n is not modelled (one argument)"
+			expanded+=$line
+			;;
+		F | f | B | '') die "a keyword's %$c is not modelled" ;;
+		*) expanded+=%$c ;;
+		esac
+		in=${in:1}
+	done
+	expanded+=$in
+}
+# the plist's keyword lines (plugins.mk:264-282: a .sample source @sample, a .shadow source @shadow, the name
+# as installed), in plugins.mk's sort, C order here; each expansion is kept without its newline, \036 after each
+lines=()
+for p in "${installed[@]}"; do
+	[[ -n $p ]] || continue
+	case ${from[$p]%.in} in
+	*.sample) lines+=("@sample $p") ;;
+	*.shadow) lines+=("@shadow $p") ;;
+	esac
+done
+((${#lines[@]} == 0)) || mapfile -t lines < <(printf '%s\n' "${lines[@]}" | LC_ALL=C sort)
+declare -A ex=()
+for l in "${lines[@]}"; do
+	k=${l%% *} p=${l#* }
+	for key in pre-install post-install pre-deinstall post-deinstall; do
+		[[ -n ${kwbody[${k#@}:$key]+set} ]] || continue
+		expand "${kwbody[${k#@}:$key]}" "$p"
+		s=${key^^}
+		ex[${s//-/_}]+=${expanded%$'\n'}$'\036'
+	done
+done
+
+# compare <name> <file part> <expansions> <the package's text, decoded>: equal, or fail on the first line that
+# differs from the derived text shown in the order the package suggests (the expansions it matched, then the one
+# whose first line it holds next, then the rest in plist order)
+compare() {
+	local n=$1 a=$4 l rest want first hit i j
+	local -a exps=() left=() order=() got=() der=()
+	[[ -z $3 ]] || mapfile -d $'\036' -t exps < <(printf '%s' "$3")
+	l=${2#"${2%%[!"$ws"]*}"}
+	if ((${#exps[@]} == 0)); then
+		want=${l%"${l##*[!"$ws"]}"}
+		[[ $a != "$want" ]] || return 0
+	else
+		left=("${!exps[@]}")
+		if [[ $a == "$l"* ]]; then
+			rest=${a#"$l"}
+			while [[ -n $rest ]]; do
+				hit=''
+				for i in "${!left[@]}"; do
+					if [[ $rest == "${exps[left[i]]}" ]]; then
+						rest='' hit=$i
+					elif [[ $rest == "${exps[left[i]]}"$'\n'?* ]]; then
+						rest=${rest#"${exps[left[i]]}"$'\n'} hit=$i
+					else
+						continue
+					fi
+					break
+				done
+				[[ -n $hit ]] || break
+				order+=("${left[hit]}")
+				unset 'left[hit]'
+			done
+			[[ -n $rest || ${#left[@]} -gt 0 ]] || return 0
+			first=${rest%%$'\n'*}
+			for i in "${!left[@]}"; do
+				if [[ -n $rest && ${exps[left[i]]%%$'\n'*} == "$first" ]]; then
+					order+=("${left[i]}")
+					unset 'left[i]'
+					break
+				fi
+			done
+		fi
+		order+=("${left[@]}")
+		want=$l
+		for i in "${!order[@]}"; do
+			((i == 0)) || want+=$'\n'
+			want+=${exps[order[i]]}
+		done
+	fi
+	mapfile -t got <<<"$a"
+	mapfile -t der <<<"$want"
+	for ((j = 0; j < ${#got[@]} || j < ${#der[@]}; j++)); do
+		((j < ${#der[@]})) || die "script $n: line $((j + 1)) is \"${got[j]}\", derived nothing more"
+		((j < ${#got[@]})) || die "script $n: line $((j + 1)) is missing, derived \"${der[j]}\""
+		[[ ${got[j]} == "${der[j]}" ]] || die "script $n: line $((j + 1)) is \"${got[j]}\", derived \"${der[j]}\""
+	done
+	die "script $n: differs from the derived text"
+}
+declare -A have=()
+# a checked read: a failure here must not leave a script of the package unseen
+v=$(jq -r '.scripts // {} | keys[]' <<<"$M") || die "cannot read the scripts' names"
+names=()
+[[ -z $v ]] || mapfile -t names <<<"$v"
+[[ $(jq '.scripts // {} | length' <<<"$M") == "${#names[@]}" ]] || die "cannot read the scripts' names"
+for n in "${names[@]}"; do
+	v=$(jq -j --arg k "$n" '.scripts[$k] | split("%25") | join("%")' <<<"$M" && printf x) || die "cannot read script $n"
+	have[$n]=${v%x}
+done
+derived=0
+for n in pre-install post-install pre-deinstall post-deinstall install deinstall; do
+	s=${n^^}
+	s=${s//-/_}
+	if [[ -z ${made[$s]:-} && -z ${ex[$s]:-} ]]; then
+		[[ -z ${have[$n]+set} ]] || die "script $n: in the package, though the source derives none"
+		continue
+	fi
+	# pkg create's handling of an empty script (an empty source, or one of blanks) is not modelled
+	v=${part[$s]:-}
+	v=${v//[$ws]/}
+	[[ -n ${ex[$s]:-} || -n $v ]] || die "script $n: derived empty, which is not supported (pkg's handling of an empty script is not modelled)"
+	[[ -n ${have[$n]+set} ]] || die "script $n: not in the package, though the source derives one"
+	compare "$n" "${part[$s]:-}" "${ex[$s]:-}" "${have[$n]}"
+	derived=$((derived + 1))
+done
+
 echo "payload: OK (${#files[@]} files)"
+echo "scripts: derived from the source, identical ($derived)"
 jq -r '.scripts // {} | to_entries | sort_by(.key)[]
 	| "script \(.key):", (.value | split("%25") | join("%") | split("\n")[] | "\t" + .)' <<<"$M"
