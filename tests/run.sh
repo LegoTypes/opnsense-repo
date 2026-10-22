@@ -500,9 +500,12 @@ expect_eq "writers: a build job step writing the summary is found" "$(writers "$
 export PATH="$root/tests/stub:$PATH" GH_REPO=Org/repo
 unset GITHUB_SHA
 sum() { sha256sum "$1" | awk '{print $1}'; }
-# Templates/ and Keywords/ of opnsense/plugins and LegoTypes/plugins master: the templates as they are there, and
-# keyword files shaped as there (a comment header, here a synthetic one) holding the flags and script bodies pkg
-# create reads
+# Templates/ and Keywords/ of opnsense/plugins and LegoTypes/plugins master as gh api serves them (the listing of
+# each directory, and each file's content): the templates as they are there, and keyword files shaped as there
+# (a comment header, here a synthetic one) holding the flags and script bodies pkg create reads
+up_templates='[{"name":"actions.d","type":"file"},{"name":"configure","type":"file"},{"name":"models","type":"file"},
+ {"name":"rc.loader.d","type":"file"},{"name":"templates","type":"file"},{"name":"version","type":"file"}]'
+up_keywords='[{"name":"sample.ucl","type":"file"},{"name":"shadow.ucl","type":"file"}]'
 updir="$T/upstream"
 mkdir -p "$updir/Templates" "$updir/Keywords"
 printf '%s\n' 'if [ -f /usr/local/etc/rc.d/configd ]; then /usr/local/etc/rc.d/configd restart; fi' >"$updir/Templates/actions.d"
@@ -570,6 +573,12 @@ reset_stub() {
 	export STUB="$T/stub"
 	rm -rf "$STUB"
 	mkdir -p "$STUB/notes" "$STUB/assets"
+	for r in opnsense/plugins LegoTypes/plugins; do
+		mkdir -p "$STUB/contents/$r" "$STUB/raw/$r"
+		printf '%s\n' "$up_templates" >"$STUB/contents/$r/Templates"
+		printf '%s\n' "$up_keywords" >"$STUB/contents/$r/Keywords"
+		cp -R "$updir/Templates" "$updir/Keywords" "$STUB/raw/$r/"
+	done
 	: >"$STUB/tags"
 	echo '[]' >"$STUB/releases.json"
 	echo '[]' >"$STUB/issues.json"
@@ -2489,6 +2498,57 @@ rm "$STUB/fail_issues"
 echo '[{"number":7,"title":"canary: os-alpha"},{"number":9,"title":"canary: os-alpha"}]' >"$STUB/issues.json"
 expect_fail "report: two open issues with one title" crep
 
+# --- canary-constants.sh: verify-payload.sh's copies against both masters ----------------------------
+reset_stub
+ccs() { bash "$S/canary-constants.sh"; echo "rc=$?"; }
+expect_eq "constants: both masters hold the copies (a keyword's comments aside)" "$(ccs)" "rc=0"
+sed 's/cp -p/cp -f/' "$updir/Keywords/shadow.ucl" >"$STUB/raw/LegoTypes/plugins/Keywords/shadow.ucl"
+expect_eq "constants: a keyword whose script body differs" "$(ccs)" \
+	$'MATERIAL: LegoTypes/plugins master\'s Keywords/shadow.ucl differs from verify-payload.sh\'s copy in its flags or script bodies\nrc=1'
+{ cat "$updir/Keywords/shadow.ucl"; printf 'post-deinstall: <<EOD\n  rm -f /tmp/x\nEOD\n'; } >"$STUB/raw/LegoTypes/plugins/Keywords/shadow.ucl"
+expect_eq "constants: a keyword that adds to another script" "$(ccs)" \
+	$'MATERIAL: LegoTypes/plugins master\'s Keywords/shadow.ucl differs from verify-payload.sh\'s copy in its flags or script bodies\nrc=1'
+{ cat "$updir/Keywords/shadow.ucl"; printf 'preformat_arguments: true\n'; } >"$STUB/raw/LegoTypes/plugins/Keywords/shadow.ucl"
+expect_eq "constants: a keyword with a key verify-payload.sh does not model" "$(ccs)" \
+	$'MATERIAL: LegoTypes/plugins master\'s Keywords/shadow.ucl is not in the form verify-payload.sh models (comments, actions: [file(1)], arguments: true and script bodies)\nrc=1'
+reset_stub
+printf '# a new first line\n' | cat - "$updir/Keywords/sample.ucl" >"$STUB/raw/opnsense/plugins/Keywords/sample.ucl"
+expect_eq "constants: a keyword whose comments change is not reported" "$(ccs)" "rc=0"
+printf 'if true; then /usr/local/etc/rc.d/configd restart; fi\n' >"$STUB/raw/opnsense/plugins/Templates/actions.d"
+expect_eq "constants: a template that differs" "$(ccs)" \
+	$'MATERIAL: opnsense/plugins master\'s Templates/actions.d differs from verify-payload.sh\'s copy\nrc=1'
+reset_stub
+head -c 70000 /dev/zero | tr '\0' '#' >"$STUB/raw/opnsense/plugins/Keywords/sample.ucl"
+rm "$STUB/raw/LegoTypes/plugins/Templates/models"
+expect_eq "constants: a file too large or that cannot be read" "$(ccs)" \
+	$'MATERIAL: opnsense/plugins master\'s Keywords/sample.ucl is over 64 KiB: it was not compared\nMATERIAL: cannot read Templates/models of LegoTypes/plugins master: it was not compared\nrc=1'
+reset_stub
+jq -c '. + [{name: "pkgdeps.ucl", type: "file"}]' <<<"$up_keywords" >"$STUB/contents/opnsense/plugins/Keywords"
+expect_eq "constants: a file master adds" "$(ccs)" \
+	$'MATERIAL: opnsense/plugins master\'s Keywords/ holds pkgdeps.ucl, which verify-payload.sh has no copy of\nrc=1'
+jq -c 'map(select(.name != "rc.loader.d"))' <<<"$up_templates" >"$STUB/contents/opnsense/plugins/Templates"
+jq -c '. + [{name: "a`b", type: "file"}, {name: "x\tfile\tshadow.ucl", type: "file"}, {name: "y\nfile shadow.ucl", type: "file"}, {name: "shadow.ucl\n", type: "file"}]' \
+	<<<"$up_keywords" >"$STUB/contents/opnsense/plugins/Keywords"
+expect_eq "constants: a file master lacks, and names that are not plain, a tab or a newline in them" "$(ccs)" \
+	"MATERIAL: opnsense/plugins master's Templates/ lacks rc.loader.d, which verify-payload.sh copies
+MATERIAL: opnsense/plugins master's Keywords/ holds a file whose name is not plain, which verify-payload.sh has no copy of
+MATERIAL: opnsense/plugins master's Keywords/ holds a file whose name is not plain, which verify-payload.sh has no copy of
+MATERIAL: opnsense/plugins master's Keywords/ holds a file whose name is not plain, which verify-payload.sh has no copy of
+MATERIAL: opnsense/plugins master's Keywords/ holds a file whose name is not plain, which verify-payload.sh has no copy of
+rc=1"
+reset_stub
+jq -c '(.[] | select(.name == "models") | .type) = "dir"' <<<"$up_templates" >"$STUB/contents/LegoTypes/plugins/Templates"
+jq -c '(.[] | select(.name == "shadow.ucl") | .type) = "file\nfile"' <<<"$up_keywords" >"$STUB/contents/LegoTypes/plugins/Keywords"
+expect_eq "constants: a copied name that is a directory, or of a type that is not plain" "$(ccs)" \
+	$'MATERIAL: LegoTypes/plugins master\'s Templates/models is not a file (dir)\nMATERIAL: LegoTypes/plugins master\'s Keywords/shadow.ucl is not a file (a type that is not plain)\nrc=1'
+reset_stub
+rm "$STUB/contents/opnsense/plugins/Templates"
+printf 'not json\n' >"$STUB/contents/LegoTypes/plugins/Keywords"
+expect_eq "constants: listings that cannot be read" "$(ccs)" \
+	$'MATERIAL: cannot read Templates/ of opnsense/plugins master: its copies were not compared\nMATERIAL: cannot read Keywords/ of LegoTypes/plugins master: its copies were not compared\nrc=1'
+reset_stub
+expect_eq "constants: usage" "$(bash "$S/canary-constants.sh" x 2>/dev/null; echo "rc=$?")" "rc=2"
+
 # --- canary-vm.sh and canary.sh --------------------------------------------------
 conf 'os-alpha  Org/plugins br net/alpha yes' \
 	'os-beta   Org/plugins br net/beta  yes'
@@ -2525,6 +2585,19 @@ expect_eq "canary: a new series and a new FreeBSD major open the series issue" \
 	"$(grep -c '^create|canary: upstream series|' "$STUB/issue_calls")" "1"
 expect_eq "canary: the series issue names both" \
 	"$(grep -c -e 'ships series 27.1' -e 'publishes FreeBSD:16:amd64' "$STUB/issue_calls")" "2"
+reset_stub
+printf 'NEWEST=26.7\nNEXT_ABI=\nSERIES=26.7\nCORE=26.7.5\nPHP=85\nPYTHON=313\nFREEBSD=15.1\n' >"$cw/upstream.env"
+printf 'echo drifted\n' >"$STUB/raw/opnsense/plugins/Templates/models"
+out=$(canary_run)
+expect_eq "canary: a copied template that drifted opens the series issue" \
+	"$out $(grep -c '^create|canary: upstream series|' "$STUB/issue_calls")" $'clean\nopened\nopened 1'
+expect_eq "canary: the series issue names the drifted copy" \
+	"$(grep -c "opnsense/plugins master's Templates/models differs from verify-payload.sh's copy" "$STUB/issue_calls")" "1"
+rm "$STUB/contents/LegoTypes/plugins/Keywords"
+: >"$STUB/issue_calls"
+canary_run >/dev/null
+expect_eq "canary: a listing that cannot be read is reported in the series issue" \
+	"$(grep -c "cannot read Keywords/ of LegoTypes/plugins master" "$STUB/issue_calls")" "1"
 rm "$cw/upstream.env"
 expect_fail "canary: refuses to run without upstream facts" canary_run
 
@@ -3079,7 +3152,7 @@ expect_eq "addresses: the scan finds an address, and one that only starts like a
 # after the shebang; no header anywhere names anyone else
 for f in scripts/carry-plan.sh scripts/manifest.sh scripts/out-dir.sh scripts/payload.sh scripts/pkg-tool.sh \
 	scripts/plugin-source.sh scripts/provenance.sh scripts/review-sums.sh scripts/summary.sh scripts/ubuntu-apt.sh \
-	scripts/verify-payload.sh scripts/stamp-check.sh tests/stub-apt/apt-get; do
+	scripts/verify-payload.sh scripts/stamp-check.sh scripts/canary-constants.sh tests/stub-apt/apt-get; do
 	expect_eq "$f: the copyright line after the shebang" "$(sed -n 2p "$root/$f")" "# Copyright (C) 2026 cayossarian"
 done
 expect_eq "every copyright header names cayossarian alone" \

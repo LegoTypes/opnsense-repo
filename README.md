@@ -57,7 +57,11 @@ the PHP and Python core depends on (`scripts/upstream.sh`). It then builds every
 FreeBSD 15, as a publish would now and with `opnsense/plugins` master's `Mk/`, and compares both with the
 package of its newest release (`scripts/compare-package.sh`). Each package has one issue labelled `canary`,
 opened or updated when something material differs and closed when it is clean again. `canary: upstream series`
-opens when OPNsense ships a newer series or a new FreeBSD ABI. A material finding fails the run.
+opens when OPNsense ships a newer series or a new FreeBSD ABI, and when `opnsense/plugins` or
+`LegoTypes/plugins` master no longer agrees with what `verify-payload.sh` copies of `Templates/` and
+`Keywords/` to derive the install scripts (`scripts/canary-constants.sh`): a template byte for byte, a keyword
+file's flags and script bodies as `verify-payload.sh --model` reads them (a change to its comments is not
+reported; a line of another kind is). A material finding fails the run.
 
 The canary never publishes. A finding is acted on by a person:
 
@@ -65,6 +69,14 @@ The canary never publishes. A finding is acted on by a person:
 - **"upstream Mk/ would change ..."**: rebase the branch on the fork's master (below), test, bump, publish.
 - **A failed build**: read the log tail in the issue.
 - **The series issue**: see Series change.
+- **"... master's Templates/... or Keywords/... differs from verify-payload.sh's copy"** (or is not in the form
+  modelled, or a file is added or missing): compare master's file with the copy (`bash scripts/verify-payload.sh
+  --copied Keywords/shadow.ucl`, and `--model <file>` for how a keyword file reads). The canary blocks nothing,
+  but a package built from the changed file fails the payload check. Once the change is understood, change the
+  copy in `verify-payload.sh` in a reviewed commit: a template whole, a keyword's flags and script bodies only,
+  never its comment header. Change how they are used along with them (`Mk/plugins.mk`'s scripts and plist
+  targets, `pkg create`), update the copies tests and fixtures in `tests/run.sh` (a template's blob id, the
+  master-shaped keyword fixtures), and run the tests.
 
 ## Developing a plugin
 

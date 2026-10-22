@@ -5,7 +5,11 @@
 #   immutable/<tag>      present: gh release view <tag> --json isImmutable says true (else false)
 #   assets/<tag>/<file>  release assets
 #   tags                 existing git tags, one per line
-#   fail_api             present: gh api fails
+#   fail_api             present: gh api fails (but for contents/)
+#   contents/<owner>/<repository>/<directory>
+#                        gh api repos/<owner>/<repository>/contents/<directory>?ref=master (absent: HTTP 404)
+#   raw/<owner>/<repository>/<path>
+#                        the same with -H 'Accept: application/vnd.github.raw': the file's content
 #   created              gh release create appends "<tag>|<file>|<target>" and the notes
 set -euo pipefail
 case "$1 $2" in
@@ -80,6 +84,28 @@ case "$1 $2" in
 	;;
 "issue close")
 	printf 'close|%s|%s\n' "$3" "$5" >>"$STUB/issue_calls"
+	;;
+"api repos/"*"/contents/"*)
+	path=${2#repos/}
+	[[ $path == *'?ref=master' ]] || {
+		echo "stub gh: contents only at ref master: $2" >&2
+		exit 2
+	}
+	path=${path%'?ref=master'}
+	kind=contents
+	if [[ $# -gt 2 ]]; then
+		[[ $# -eq 4 && $3 == -H && $4 == 'Accept: application/vnd.github.raw' ]] || {
+			echo "stub gh: unsupported: $*" >&2
+			exit 2
+		}
+		kind=raw
+	fi
+	f="$STUB/$kind/${path%%/contents/*}/${path#*/contents/}"
+	[[ -f $f ]] || {
+		echo "HTTP 404: Not Found" >&2
+		exit 1
+	}
+	cat "$f"
 	;;
 "api "*)
 	[[ ! -e $STUB/fail_api ]] || {

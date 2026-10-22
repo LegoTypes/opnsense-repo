@@ -3,7 +3,8 @@
 # On the runner, after upstream.sh (upstream.env) and canary-vm.sh (canary/): for
 # each catalogue package fetch its newest release beside the fresh builds, write
 # its findings and keep its issue in step; then the same for the upstream series
-# and FreeBSD ABI. Exits 1 if anything was material, so the run fails and GitHub
+# and FreeBSD ABI, and for verify-payload.sh's copies of opnsense/plugins' Templates/
+# and Keywords/ (canary-constants.sh). Exits 1 if anything was material, so the run fails and GitHub
 # mails the owner; 2 if it cannot run at all.
 # gh takes the repository from GH_REPO and the token from GH_TOKEN.
 set -euo pipefail
@@ -59,6 +60,12 @@ series=$(sh "$here/repo.sh" series)
 	fi
 	if [[ -n $next ]]; then
 		echo "MATERIAL: OPNsense now publishes $next; this repository targets $(sh "$here/repo.sh" abi) (README: Series change)"
+	fi
+	# the Templates/ and Keywords/ copies verify-payload.sh derives the install scripts from, against both masters
+	rc=0
+	bash "$here/canary-constants.sh" || rc=$?
+	if ((rc > 1)); then
+		echo "MATERIAL: verify-payload.sh's copies of Templates/ and Keywords/ could not be compared (exit $rc)"
 	fi
 	printf '%s\n' "$facts"
 } >canary/series.findings
