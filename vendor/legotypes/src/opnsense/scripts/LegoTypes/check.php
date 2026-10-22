@@ -13,10 +13,10 @@ declare(strict_types=1);
  * package, and lists available updates and hand-installed packages. Then reads the
  * repository's signed catalogue stamp: when the catalogue was published; a mismatch if
  * the site answers without a valid stamp (404, any answer but 200 and 5xx, a forged or
- * malformed stamp); information only if the site cannot be reached or has an outage. A
- * signature that does not verify is fetched once more first, as a deploy can land between
- * the fetches. Prints its findings, and that the packages fit only when nothing mismatches;
- * exits 1 on a mismatch (Monit alerts when that starts and when it ends), 0 otherwise.
+ * malformed stamp); information only if the site cannot be reached or has an outage. The
+ * stamp is one file, fetched once. Prints its findings, and that the packages fit only when
+ * nothing mismatches; exits 1 on a mismatch (Monit alerts when that starts and when it
+ * ends), 0 otherwise.
  */
 
 require_once __DIR__ . '/lib.php';
@@ -40,42 +40,37 @@ function lt_rows(string $cmd, int $fields): array
 }
 
 /**
- * Fetch the stamp's three files from beside the catalogue, recording only what happened:
- * [name => [status, body] for each file the site answered; null, or the transport failure
- * that stopped the fetch (the file, curl's error number and message)]. Classifying it is
- * legotypes_stamp_findings()'s. Each fetch connects within 3 s and ends within 6 s, so the
+ * Fetch the stamp, one file beside the catalogue, recording only what happened: [the
+ * site's answer (status and body), or null; null, or the transport failure that stopped
+ * the fetch (curl's error number and message)]. Classifying it is
+ * legotypes_stamp_findings()'s. The fetch connects within 3 s and ends within 6 s, so the
  * check never holds Monit up; redirects are not followed; a body over
  * LEGOTYPES_STAMP_MAX_BYTES stops the transfer (CURLE_FILESIZE_EXCEEDED: libcurl 8.4 and
  * later enforce CURLOPT_MAXFILESIZE with or without a Content-Length; 26.7 ships 8.22).
  *
- * @return array{0: array<string, array{status: int, body: string}>, 1: ?array{file: string, errno: int, error: string}}
+ * @return array{0: ?array{status: int, body: string}, 1: ?array{errno: int, error: string}}
  */
 function lt_fetch_stamp(string $url): array
 {
-    $files = [];
     $ch = curl_init();
     if ($ch === false) {
-        return [$files, ['file' => 'stamp', 'errno' => CURLE_FAILED_INIT, 'error' => 'curl could not start']];
+        return [null, ['errno' => CURLE_FAILED_INIT, 'error' => 'curl could not start']];
     }
-    foreach (['stamp', 'stamp.sig', 'stamp.pub'] as $name) {
-        curl_setopt_array($ch, [
-            CURLOPT_URL => "{$url}/{$name}",
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_FOLLOWLOCATION => false,
-            CURLOPT_CONNECTTIMEOUT => 3,
-            CURLOPT_TIMEOUT => 6,
-            CURLOPT_MAXFILESIZE => LEGOTYPES_STAMP_MAX_BYTES,
-        ]);
-        $body = curl_exec($ch);
-        if (!is_string($body)) {
-            $errno = curl_errno($ch);
-            $error = curl_error($ch);
-            $error = $error !== '' ? $error : (string)curl_strerror($errno);
-            return [$files, ['file' => $name, 'errno' => $errno, 'error' => $error]];
-        }
-        $files[$name] = ['status' => (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE), 'body' => $body];
+    curl_setopt_array($ch, [
+        CURLOPT_URL => "{$url}/stamp",
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_CONNECTTIMEOUT => 3,
+        CURLOPT_TIMEOUT => 6,
+        CURLOPT_MAXFILESIZE => LEGOTYPES_STAMP_MAX_BYTES,
+    ]);
+    $body = curl_exec($ch);
+    if (!is_string($body)) {
+        $errno = curl_errno($ch);
+        $error = curl_error($ch);
+        return [null, ['errno' => $errno, 'error' => $error !== '' ? $error : (string)curl_strerror($errno)]];
     }
-    return [$files, null];
+    return [['status' => (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE), 'body' => $body], null];
 }
 
 /**
@@ -131,7 +126,8 @@ if ($confText !== null && $urlSeries !== null) {
         $fingerprints = '/usr/local/etc/pkg/fingerprints/LegoTypes';
         $trusted = legotypes_fingerprints(lt_fingerprint_files("{$fingerprints}/trusted"),
             lt_fingerprint_files("{$fingerprints}/revoked"));
-        $stamp = legotypes_stamp_check(fn (): array => lt_fetch_stamp($url), $trusted, time(), "{$abi}/{$urlSeries}");
+        [$answer, $transport] = lt_fetch_stamp($url);
+        $stamp = legotypes_stamp_findings($answer, $transport, $trusted, time(), "{$abi}/{$urlSeries}");
     }
     foreach ($stamp as [$level, $text]) {
         $r[$level === 'MISMATCH' ? 'mismatch' : 'info'][] = $text;
