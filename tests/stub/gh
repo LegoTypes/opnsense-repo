@@ -9,7 +9,8 @@
 #   contents/<owner>/<repository>/<directory>
 #                        gh api repos/<owner>/<repository>/contents/<directory>?ref=master (absent: HTTP 404)
 #   raw/<owner>/<repository>/<path>
-#                        the same with -H 'Accept: application/vnd.github.raw': the file's content
+#                        the same with -H 'Accept: application/vnd.github.raw': the file's content, or with
+#                        <path>.stream present, 50 MB, and "whole" or "cut" appended to stream
 #   created              gh release create appends "<tag>|<file>|<target>" and the notes
 set -euo pipefail
 case "$1 $2" in
@@ -101,6 +102,11 @@ case "$1 $2" in
 		kind=raw
 	fi
 	f="$STUB/$kind/${path%%/contents/*}/${path#*/contents/}"
+	if [[ $kind == raw && -f $f.stream ]]; then
+		# 50 MB of content: "whole" or "cut" (its reader stopped early) goes to $STUB/stream
+		if head -c 52428800 /dev/zero | tr '\0' '#'; then echo whole >>"$STUB/stream"; else echo cut >>"$STUB/stream"; fi
+		exit 0
+	fi
 	[[ -f $f ]] || {
 		echo "HTTP 404: Not Found" >&2
 		exit 1

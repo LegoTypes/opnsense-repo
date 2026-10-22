@@ -75,11 +75,17 @@ for repo in opnsense/plugins LegoTypes/plugins; do
 				say "$repo master's $c is not a file (${seen[$c]})"
 				continue
 			fi
+			# the download itself is bounded: one byte past 64 KiB says it is larger, and gh is cut off there
 			f=$work/upstream
-			if ! gh api "repos/$repo/contents/$c?ref=master" -H 'Accept: application/vnd.github.raw' >"$f" 2>/dev/null; then
-				say "cannot read $c of $repo master: it was not compared"
-			elif (($(wc -c <"$f") > 65536)); then
+			set +o pipefail
+			gh api "repos/$repo/contents/$c?ref=master" -H 'Accept: application/vnd.github.raw' 2>/dev/null |
+				head -c 65537 >"$f"
+			got=("${PIPESTATUS[@]}")
+			set -o pipefail
+			if (($(wc -c <"$f") > 65536)); then
 				say "$repo master's $c is over 64 KiB: it was not compared"
+			elif ((got[0] != 0 || got[1] != 0)); then
+				say "cannot read $c of $repo master: it was not compared"
 			elif [[ $c == Templates/* ]]; then
 				cmp -s "$f" "$work/copy/$c" || say "$repo master's $c differs from verify-payload.sh's copy"
 			elif ! bash "$here/verify-payload.sh" --model "$f" >"$work/model" 2>/dev/null; then

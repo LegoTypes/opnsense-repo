@@ -2396,6 +2396,28 @@ expect_eq "model: a changed body reads otherwise" \
 	"$( [[ $(vpl --model "$T/model.ucl") == "$(vpl --model "$updir/Keywords/shadow.ucl")" ]] && echo same || echo differs)" differs
 expect_fail "model: usage" vpl --model
 expect_fail "model: no such file" vpl --model "$T/nothing.ucl"
+# a repeated flag, and bytes the shell would drop or change, are refused: no change to the file reads as none
+for flag in 'actions: [file(1)]' 'arguments: true'; do
+	{ cat "$updir/Keywords/shadow.ucl"; printf '%s\n' "$flag"; } >"$T/model.ucl"
+	expect_eq "model: $flag repeated" "$(vpl --model "$T/model.ucl" 2>&1 >/dev/null)" \
+		"verify-payload.sh: $T/model.ucl: $flag is repeated"
+done
+{ printf '# a comment with a NUL \000 in it\n'; cat "$updir/Keywords/shadow.ucl"; } >"$T/model.ucl"
+expect_eq "model: a NUL, which the shell would drop" "$(vpl --model "$T/model.ucl" 2>&1 >/dev/null)" \
+	"verify-payload.sh: $T/model.ucl: holds bytes other than printable ASCII, tab and newline, which is not modelled"
+{ printf '# caf\303\251\n'; cat "$updir/Keywords/shadow.ucl"; } >"$T/model.ucl"
+expect_eq "model: a byte beyond ASCII" "$(vpl --model "$T/model.ucl" 2>&1 >/dev/null)" \
+	"verify-payload.sh: $T/model.ucl: holds bytes other than printable ASCII, tab and newline, which is not modelled"
+sed 's/$/\r/' "$updir/Keywords/shadow.ucl" >"$T/model.ucl"
+expect_eq "model: CR line ends" "$(vpl --model "$T/model.ucl" 2>&1 >/dev/null)" \
+	"verify-payload.sh: $T/model.ucl: holds bytes other than printable ASCII, tab and newline, which is not modelled"
+# the payload check reads its copies with the same parser: a copy with a repeated flag is a fault it refuses
+awk '/^arguments: true$/ && ++n == 2 { print } { print }' "$root/scripts/verify-payload.sh" >"$T/mutant-vp.sh"
+expect_eq "model: the mutant's shadow copy repeats arguments: true" "$(grep -cx 'arguments: true' "$T/mutant-vp.sh")" 3
+vreset
+expect_eq "scripts: a copy with a repeated flag is refused" \
+	"$(bash "$T/mutant-vp.sh" "$vp/alpha.pkg" "$vp/net/alpha" os-alpha 1.0 FreeBSD:15:amd64 26.7 "$commit" 2>&1 >/dev/null)" \
+	"verify-payload.sh: the copy of Keywords/shadow.ucl: arguments: true is repeated"
 expect_fail "copied: a file it holds no copy of" bash "$root/scripts/verify-payload.sh" --copied Templates/version
 expect_fail "copied: usage" bash "$root/scripts/verify-payload.sh" --copied Templates/actions.d x
 
@@ -2511,6 +2533,16 @@ expect_eq "constants: a keyword that adds to another script" "$(ccs)" \
 { cat "$updir/Keywords/shadow.ucl"; printf 'preformat_arguments: true\n'; } >"$STUB/raw/LegoTypes/plugins/Keywords/shadow.ucl"
 expect_eq "constants: a keyword with a key verify-payload.sh does not model" "$(ccs)" \
 	$'MATERIAL: LegoTypes/plugins master\'s Keywords/shadow.ucl is not in the form verify-payload.sh models (comments, actions: [file(1)], arguments: true and script bodies)\nrc=1'
+{ cat "$updir/Keywords/shadow.ucl"; printf 'actions: [file(1)]\n'; } >"$STUB/raw/LegoTypes/plugins/Keywords/shadow.ucl"
+expect_eq "constants: a keyword that repeats a flag" "$(ccs)" \
+	$'MATERIAL: LegoTypes/plugins master\'s Keywords/shadow.ucl is not in the form verify-payload.sh models (comments, actions: [file(1)], arguments: true and script bodies)\nrc=1'
+{ printf '# \000\n'; cat "$updir/Keywords/shadow.ucl"; } >"$STUB/raw/LegoTypes/plugins/Keywords/shadow.ucl"
+expect_eq "constants: a keyword with a NUL in a comment" "$(ccs)" \
+	$'MATERIAL: LegoTypes/plugins master\'s Keywords/shadow.ucl is not in the form verify-payload.sh models (comments, actions: [file(1)], arguments: true and script bodies)\nrc=1'
+reset_stub
+touch "$STUB/raw/opnsense/plugins/Templates/models.stream"
+expect_eq "constants: a 50 MB file is reported over 64 KiB, its download cut off" "$(ccs) $(cat "$STUB/stream")" \
+	$'MATERIAL: opnsense/plugins master\'s Templates/models is over 64 KiB: it was not compared\nrc=1 cut'
 reset_stub
 printf '# a new first line\n' | cat - "$updir/Keywords/sample.ucl" >"$STUB/raw/opnsense/plugins/Keywords/sample.ucl"
 expect_eq "constants: a keyword whose comments change is not reported" "$(ccs)" "rc=0"

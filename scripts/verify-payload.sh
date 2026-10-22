@@ -234,8 +234,14 @@ ucl_model() {
 		fi
 		case $l in
 		'' | '#'*) ;;
-		'actions: [file(1)]') acts=1 ;;
-		'arguments: true') args=1 ;;
+		'actions: [file(1)]' | 'arguments: true')
+			# each flag once, as each script's body (libucl would read a repeated key as an array)
+			if [[ ( $l == actions:* && -n $acts ) || ( $l == arguments:* && -n $args ) ]]; then
+				model_err="$l is repeated"
+				return 1
+			fi
+			if [[ $l == actions:* ]]; then acts=1; else args=1; fi
+			;;
 		*)
 			if [[ ! $l =~ ^(pre-install|post-install|pre-deinstall|post-deinstall):\ \<\<([A-Z]+)$ ]]; then
 				model_err="a line other than a comment, the two flags and the script bodies is not modelled"
@@ -275,6 +281,11 @@ case ${1:-} in
 --model)
 	[[ $# -eq 2 ]] || die "usage: verify-payload.sh --model <file>"
 	[[ -f $2 ]] || die "$2: no such file"
+	# every byte as the shell will read it: a NUL, which the shell would drop, or any other byte outside
+	# printable ASCII, tab and newline is refused, so no change to the file can read as none
+	if LC_ALL=C grep -q $'[^\t -~]' "$2" || [[ $(tr -d '\000' <"$2" | wc -c) -ne $(wc -c <"$2") ]]; then
+		die "$2: holds bytes other than printable ASCII, tab and newline, which is not modelled"
+	fi
 	t=$(cat -- "$2" && printf x) || die "cannot read $2"
 	ucl_model "${t%x}" || die "$2: $model_err"
 	margs=()
