@@ -106,7 +106,13 @@ The canary never publishes. A finding is acted on by a person:
    - a `packages.conf` row;
    - a `publish.yml` choice (`tests/run.sh` fails without it);
    - a README row;
-   - a setup-script install command.
+   - a setup-script install command;
+   - a `pkg-descr`: a regular file, not a symbolic link, holding only printable ASCII, tab and newline (bytes
+     0x20 to 0x7E, tab and LF; a CR or any byte beyond ASCII fails the payload check);
+   - a `PLUGIN_LICENSE`, if the Makefile sets one, of one plain word (`[A-Za-z0-9._+-]+`; unset, it is
+     BSD2CLAUSE);
+   - no `PLUGIN_DEPENDS` (dependencies are refused until their origin and version are derived from the verified
+     upstream catalogue).
 
 ## Series change
 
