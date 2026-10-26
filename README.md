@@ -6,19 +6,19 @@ The plugins, what they do and how to install them: <https://legotypes.github.io>
 
 ## Publishing
 
-[`packages.conf`](packages.conf) lists every package, the branch it is built from and whether it is in the catalogue. Each publish builds **one** package; every other catalogue package is carried forward byte for byte from its latest release, so work on another plugin's branch never ships with it.
+[`packages.conf`](packages.conf) lists every package, the repository, branch and directory it is built from, and whether it is in the catalogue. Each publish builds **one** package; every other catalogue package is carried forward byte for byte from its latest release, so work on another plugin never ships with it. Every package builds in the pinned framework (below).
 
 | Package | Source | How it ships |
 | --- | --- | --- |
-| `os-wg-client-tunnels` | `LegoTypes/plugins`, branch `add-wg-ipv6-gateway` | catalogue, `publish` |
-| `os-mac-alias-cache` | `LegoTypes/plugins`, branch `add-mac-alias-cache` | catalogue, `publish` |
-| `os-wan-failover` | `LegoTypes/plugins`, branch `add-wan-failover` | catalogue, `publish` (not on the site) |
-| `os-unbound-upstream` | `LegoTypes/plugins`, branch `add-unbound-upstream` | catalogue, `publish` (not on the site) |
+| `os-wg-client-tunnels` | `LegoTypes/plugins`, `main`, `net/wg-client-tunnels` | catalogue, `publish` |
+| `os-mac-alias-cache` | `LegoTypes/plugins`, `main`, `net/mac-alias-cache` | catalogue, `publish` |
+| `os-wan-failover` | `LegoTypes/plugins`, `main`, `net/wan-failover` | catalogue, `publish` (not on the site) |
+| `os-unbound-upstream` | `LegoTypes/plugins`, `main`, `dns/unbound-upstream` | catalogue, `publish` (not on the site) |
 | `os-legotypes` | this repository, `vendor/legotypes` on `main` | catalogue, `publish` |
 
-1. Commit the change on its branch with a `PLUGIN_VERSION` or `PLUGIN_REVISION` bump and push it. A run whose version already has a release fails before anything is published: pkg would not see an unchanged version as an update.
-2. Start the workflow at the commit to publish, named in full. For `os-legotypes`, from `main` at its head (after a `git fetch`): `gh workflow run publish -R LegoTypes/opnsense-repo -f package=os-legotypes -f commit=$(git rev-parse origin/main)`; the run refuses any commit but the one it runs at. For a plugin, a commit on its branch, for example `gh workflow run publish -R LegoTypes/opnsense-repo -f package=os-wan-failover -f commit=$(git -C <plugins checkout> rev-parse origin/add-wan-failover)`; a commit that is not on the package's branch is refused.
-3. The `build` job builds exactly that commit in FreeBSD 15 and uploads the package; it holds no secret and names no environment, and nothing it does after the VM is trusted. The `review` job then runs on a runner of its own, with this repository's scripts and GitHub's actions only: it writes the release notes' source and build lines itself (the commit and the plugin source, `repo.conf` and OPNsense's mirror, never the VM's lines), checks the version is new, and ends with a summary on the run's page, **build / review summary**. Read it before approving:
+1. Commit the change to the plugin's directory on `main` of `LegoTypes/plugins` with a `PLUGIN_VERSION` or `PLUGIN_REVISION` bump, and push it. A run whose version already has a release fails before anything is published: pkg would not see an unchanged version as an update.
+2. Start the workflow at the commit to publish, named in full. For `os-legotypes`, from `main` at its head (after a `git fetch`): `gh workflow run publish -R LegoTypes/opnsense-repo -f package=os-legotypes -f commit=$(git rev-parse origin/main)`; the run refuses any commit but the one it runs at. For a plugin, a commit on `main` of `LegoTypes/plugins`, for example `gh workflow run publish -R LegoTypes/opnsense-repo -f package=os-wan-failover -f commit=$(git -C <plugins checkout> rev-parse origin/main)`; a commit that is not on `main` of the package's repository is refused.
+3. The `build` job builds exactly that commit in FreeBSD 15, in the pinned framework, and uploads the package; it holds no secret and names no environment, and nothing it does after the VM is trusted. The `review` job then runs on a runner of its own, with this repository's scripts and GitHub's actions only: it writes the release notes' source and build lines itself (the commit and the package's directory, the framework pin in `repo.conf` and OPNsense's mirror, never the VM's lines), checks the version is new, and ends with a summary on the run's page, **build / review summary**. Read it before approving:
    - the commit, the built file with its sha256, and the source line its release notes will start with;
    - the manifest: every release that will be carried forward, with the sha256 its notes record and whether it is immutable;
    - the payload check: whether the package holds exactly what the plugin source at the commit installs. That covers the install scripts: `verify-payload.sh` derives them from the plugin directory at the commit, as `Mk/plugins.mk` and `pkg create` make them, from its own reviewed copies of `opnsense/plugins`' `Templates/` and `Keywords/`, and refuses a package whose scripts differ by one byte (`scripts: derived from the source, identical (<n>)`). Their text is in a collapsed section for reference; there is nothing in it to review. With files, manifest, annotations and scripts all derived, what the build VM chooses is down to each file's mtime, the FreeBSD minor version in the `FreeBSD_version` annotation, and the order of the `@sample`/`@shadow` expansions within a script, each of which is derived (the plist is its own `sort`); besides those, only how the archive is packed (member order, compression, the sum's kind), which changes no content;
@@ -26,7 +26,7 @@ The plugins, what they do and how to install them: <https://legotypes.github.io>
    - the version file the package installs, and the release notes' build lines (the FreeBSD version as the build VM reported it).
 
    Everything the build made is shown as it is, in code blocks. Read that summary and no other; it opens by saying so. The build job writes no summary, and neither does the VM action at its pinned commit or the `anyvm.py` it runs (checked at `vmactions/freebsd-vm` a2f9a41f and anyvm 0.7.2), so any text under **build / build summary** means the build runner was tampered with, however much it looks like the review summary: reject the run (cancel it; do not approve).
-4. Approve the `release` environment only for the build you meant, having read only **build / review summary**; with anything under **build / build summary**, cancel the run instead. Its `sign` job holds the signing key and runs only GitHub's own actions and this repository's scripts. Before the key is staged it checks the package against the plugin source at the commit again, and refuses one that fails the payload check; it checks again that the version has no release (an approval can come hours later); it builds `pkg` from the source pinned in [`repo.conf`](repo.conf), and carries the other catalogue packages forward from their releases, each checked against the sha256 in its notes, refusing any change from the manifest the review job wrote. It then signs the catalogue and stamps each served tree. `publish` deploys it to Pages and, only then, records the build as the release `<package>-<version>`.
+4. Approve the `release` environment only for the build you meant, having read only **build / review summary**; with anything under **build / build summary**, cancel the run instead. Its `sign` job holds the signing key and runs only GitHub's own actions and this repository's scripts. Before the key is staged it checks the package against the plugin source at the commit again, and refuses one that fails the payload check; it checks again that the version has no release (an approval can come hours later); it builds `pkg` from the source pinned in [`repo.conf`](repo.conf) (`PKG_TOOL_COMMIT`), and carries the other catalogue packages forward from their releases, each checked against the sha256 in its notes, refusing any change from the manifest the review job wrote. It then signs the catalogue and stamps each served tree. `publish` deploys it to Pages and, only then, records the build as the release `<package>-<version>`.
 5. Firewalls update from System > Firmware > Plugins, or with `pkg upgrade`.
 
 The site serves the signed repository, its public key and `packages.txt`, and no package at its root: `os-legotypes` itself installs from the signed repository (<https://legotypes.github.io/install/>).
@@ -50,23 +50,51 @@ and that the release asset matches its notes. Straight after a deploy, Pages may
 `packages.txt` for up to 10 minutes: a "serves ... its newest release is ..." failure then clears by itself, so run
 it again after 10 minutes before acting on it.
 
+## The pinned framework
+
+Every package builds inside one `opnsense/plugins` commit, `FRAMEWORK` in [`repo.conf`](repo.conf). The build fetches
+that commit by its SHA and copies the package's directory into it, so the `Mk/`, `Keywords/`, `Templates/` and
+`Scripts/` a package is built with are the pin's, not whatever `opnsense/plugins` master holds that day. The plugin
+repository holds only the plugins: `LegoTypes/plugins` has one `main`, with each plugin in its directory, and no copy
+of the framework.
+
+It is pinned so that a package's scripts and plist change only when this repository says so: `verify-payload.sh`
+derives the install scripts from its own reviewed copies of `Templates/` and `Keywords/`, and a framework that moved
+under a build would make the payload check refuse it.
+
+To move it, edit `FRAMEWORK` in `repo.conf` in a reviewed commit:
+
+1. The canary says when upstream master has moved past the pin (a NOTE from `canary-constants.sh`, and a
+   "upstream master's framework would change ..." finding on each package it would change). Choose a commit of
+   `opnsense/plugins` master. The canary refuses a pin that is not an ancestor of upstream master, so a commit from
+   a fork or a branch of `opnsense/plugins` cannot be pinned.
+2. Check what changed in the four directories (the canary lists the `Templates/` and `Keywords/` differences), and
+   change the copies in `verify-payload.sh` along with them where they differ (see the canary section).
+3. Set the full 40-digit SHA, run `bash tests/run.sh`, and review the commit as any other change.
+4. Publish each plugin with a `PLUGIN_REVISION` bump: until it is republished, a package keeps the framework it was
+   built in, and the canary's "a publish now would change ..." finding says so.
+
 ## The canary
 
 `canary` runs every Monday (and from the Actions tab). It reads OPNsense's mirror for the series it ships and
 the PHP and Python core depends on (`scripts/upstream.sh`). It then builds every catalogue package twice in
-FreeBSD 15, as a publish would now and with `opnsense/plugins` master's `Mk/`, and compares both with the
-package of its newest release (`scripts/compare-package.sh`). Each package has one issue labelled `canary`,
+FreeBSD 15, as a publish would now (in the pinned framework) and in `opnsense/plugins` master's head instead,
+and compares both with the package of its newest release (`scripts/compare-package.sh`). Each package has one issue labelled `canary`,
 opened or updated when something material differs and closed when it is clean again. `canary: upstream series`
-opens when OPNsense ships a newer series or a new FreeBSD ABI, and when `opnsense/plugins` or
-`LegoTypes/plugins` master no longer agrees with what `verify-payload.sh` copies of `Templates/` and
-`Keywords/` to derive the install scripts (`scripts/canary-constants.sh`): a template byte for byte, a keyword
-file's flags and script bodies as `verify-payload.sh --model` reads them (a change to its comments is not
+opens when OPNsense ships a newer series or a new FreeBSD ABI, and when the pinned framework no longer agrees
+with what `verify-payload.sh` copies of `Templates/` and `Keywords/` to derive the install scripts
+(`scripts/canary-constants.sh`; upstream master's difference is only a NOTE, and the pin must be an ancestor of
+master): a template byte for byte, a keyword file's flags and script bodies as `verify-payload.sh --model` reads them (a change to its comments is not
 reported; a line of another kind is). A material finding fails the run.
 
 The canary never publishes. A finding is acted on by a person:
 
-- **"a publish now would change ..."**: bump `PLUGIN_REVISION` on the plugin's branch and publish.
-- **"upstream Mk/ would change ..."**: rebase the branch on the fork's master (below), test, bump, publish.
+- **"a publish now would change ..."**: bump `PLUGIN_REVISION` in the plugin's directory on `main` and publish.
+- **"upstream master's framework would change ..."**: upstream has moved past the pin in a way that changes this
+  package. Move the pin (The pinned framework), test, bump, publish.
+- **NOTE "release ... was built from a commit this repository does not hold"**: the release was built before
+  `LegoTypes/plugins` was one repository with a `main`, from a commit only the retired fork had, so the canary cannot
+  compare the plugin's directory. Nothing is wrong. The package's next publish builds from `main` and clears it.
 - **A failed build**: read the log tail in the issue.
 - **The series issue**: see Series change.
 - **"... master's Templates/... or Keywords/... differs from verify-payload.sh's copy"** (or is not in the form
@@ -76,19 +104,19 @@ The canary never publishes. A finding is acted on by a person:
   copy in `verify-payload.sh` in a reviewed commit: a template whole, a keyword's flags and script bodies only,
   never its comment header. Change how they are used along with them (`Mk/plugins.mk`'s scripts and plist
   targets, `pkg create`), update the copies tests and fixtures in `tests/run.sh` (a template's blob id, the
-  master-shaped keyword fixtures), and run the tests. Then rebase every plugin branch on the fork's master
-  carrying the new `Templates/` and `Keywords/` before its next publish: a plugin row builds with its own
-  branch's copies of them, so a branch still holding the old ones builds a package whose scripts differ from
-  what `verify-payload.sh` now derives, and that publish fails the payload check. The `.` row builds in the
-  fork's master and follows it at once.
+  master-shaped keyword fixtures), and run the tests. Then move `FRAMEWORK` to a
+  commit carrying the new `Templates/` and `Keywords/` in the same commit, or before the next publish: a package
+  builds in the pin's copies, so a pin still holding the old ones builds a package whose scripts differ from
+  what `verify-payload.sh` now derives, and that publish fails the payload check. Every row, `.` included,
+  builds in the pin.
 
 ## Developing a plugin
 
-1. **Branches.**
-   - Each plugin lives on its own branch of `LegoTypes/plugins` (see `packages.conf`). The fork's master only
-     fast-forwards from upstream: `gh repo sync LegoTypes/plugins -b master`.
-   - Rebase a plugin branch on it when the canary reports "upstream Mk/ would change", or before a feature
-     release. Run the plugin's tests again after a rebase.
+1. **Source.**
+   - Each plugin lives in its directory on `main` of `LegoTypes/plugins` (see `packages.conf`), and the
+     repository holds no copy of `opnsense/plugins`.
+   - A package builds in the pinned framework (The pinned framework), so upstream's changes reach a plugin only
+     when `FRAMEWORK` moves. Run the plugin's tests again after it moves.
 2. **Versions.**
    - `PLUGIN_VERSION` for a behaviour change, with a changelog line in `pkg-descr`.
    - `PLUGIN_REVISION` (`_N`) for a rebuild with no source change.
@@ -97,8 +125,8 @@ The canary never publishes. A finding is acted on by a person:
    - The plugin's own suite on the test VM.
    - Its scenario harness where one exists.
    - The install rehearsal through the setup script with `OPNSENSE_HOST` pointing at the test VM.
-4. **Publish.** Push the branch, then run `gh workflow run publish -R LegoTypes/opnsense-repo -f
-   package=<package> -f commit=<the branch's commit>`, read the review job's summary, approve `release`, and
+4. **Publish.** Push to `main`, then run `gh workflow run publish -R LegoTypes/opnsense-repo -f
+   package=<package> -f commit=<the commit on main>`, read the review job's summary, approve `release`, and
    run `bash scripts/verify-catalogue.sh <package>`.
 5. **Firewall.**
    - A new plugin installs with its setup-script command (for example `opnsense install-wan-failover`).

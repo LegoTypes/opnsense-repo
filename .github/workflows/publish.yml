@@ -24,7 +24,7 @@ on:
       commit:
         description: >-
           The full 40-character commit to build and publish (git rev-parse origin/main for
-          os-legotypes; a commit on the package's branch otherwise)
+          os-legotypes; a commit on main of the package's repository otherwise)
         type: string
         required: true
 

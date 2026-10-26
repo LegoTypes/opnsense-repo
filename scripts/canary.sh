@@ -62,7 +62,7 @@ series=$(sh "$here/repo.sh" series)
 	if [[ -n $next ]]; then
 		echo "MATERIAL: OPNsense now publishes $next; this repository targets $(sh "$here/repo.sh" abi) (README: Series change)"
 	fi
-	# the Templates/ and Keywords/ copies verify-payload.sh derives the install scripts from, against both masters
+	# the Templates/ and Keywords/ copies verify-payload.sh derives the install scripts from, against the pin and master
 	# an exit without a MATERIAL line is never clean: it could not compare
 	rc=0
 	constants=$(bash "$here/canary-constants.sh") || rc=$?

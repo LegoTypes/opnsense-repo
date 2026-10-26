@@ -77,16 +77,17 @@ die() {
 }
 
 # What the install scripts are made from, copied from opnsense/plugins master (e4578ae, 2026-10-22;
-# LegoTypes/plugins master 3afd667 agrees), and only what the model uses:
+# the pinned framework 3afd667 agrees), and only what the model uses:
 # - Templates/actions.d, configure, models, rc.loader.d and templates, each the whole file (one line), which
 #   plugins.mk's scripts-auto appends (plugins.mk:178-223, TEMPLATESDIR);
 # - of Keywords/sample.ucl and shadow.ucl, which pkg create expands for the plist's @sample and @shadow lines
 #   (PORTSDIR=the plugins tree, plugins.mk:328; libpkg pkg_ports.c external_keyword, apply_keyword_file), the
 #   flags and script bodies pkg reads, in the files' own UCL form, without their comment header.
-# They are never read from the tree the VM built in, which for the "." row is LegoTypes/plugins master at
-# whatever head the build saw: a tree whose Templates/ or Keywords/ differ builds a package this check refuses,
-# until the copies are changed in a reviewed commit. canary-constants.sh compares them each week with both
-# masters: a template byte for byte, a keyword as ucl_model reads it (--model).
+# They are never read from the tree the VM built in, which is the pinned framework (repo.conf FRAMEWORK) with
+# the package's directory copied in: a pin moved to a framework whose Templates/ or Keywords/ differ builds a
+# package this check refuses, until the copies are changed in a reviewed commit. canary-constants.sh compares
+# them each week with the pinned framework and upstream master: a template byte for byte, a keyword as
+# ucl_model reads it (--model).
 copies=(Templates/actions.d Templates/configure Templates/models Templates/rc.loader.d Templates/templates
 	Keywords/sample.ucl Keywords/shadow.ucl)
 copied() { # copied <file>: the copy of <file>

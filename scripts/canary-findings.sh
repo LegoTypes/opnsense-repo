@@ -5,7 +5,7 @@
 #   fresh.pkg, fresh.source       a build of main's head as a publish would make it
 #   rebased.pkg                   the same in opnsense/plugins master's head, not the pin
 #   fresh.tail, rebased.tail      the end of a failed build's log, instead of its .pkg
-# Prints "MATERIAL: ..." lines (a rebuild, a rebase or a look is needed) and
+# Prints "MATERIAL: ..." lines (a rebuild, a move of the framework pin or a look is needed) and
 # "NOTE: ..." lines (for information). Exits 1 if any line is MATERIAL.
 # A plugin package's NOTE is by directory: the tree of the package's directory at the commit the release's
 # source line names, against its tree at main's head (gh api git/trees, read on the runner, no clone), and the
@@ -40,7 +40,7 @@ failed() {
 }
 
 # a failed build is material whether or not there is a release to compare with
-[[ -f $d/fresh.pkg ]] || failed "building the branch as a publish would failed" "$d/fresh.tail"
+[[ -f $d/fresh.pkg ]] || failed "building main as a publish would failed" "$d/fresh.tail"
 [[ -f $d/rebased.pkg ]] || failed "building in upstream master's framework failed" "$d/rebased.tail"
 if [[ ! -f $d/published.pkg ]]; then
 	say NOTE "$pkg has no release yet; nothing to compare"
@@ -67,15 +67,15 @@ if [[ -f $d/rebased.pkg ]]; then
 	rc=0
 	rb=$(bash "$here/compare-package.sh" "$d/published.pkg" "$d/rebased.pkg") || rc=$?
 	if ((rc > 1)); then
-		say MATERIAL "the build with upstream Mk/ could not be compared with the release"
+		say MATERIAL "the build in upstream master's framework could not be compared with the release"
 	fi
-	# a rebased difference is upstream's doing (Mk/, Keywords/, Templates/, Scripts/) only when the as-published build was compared and lacks it
+	# a difference in the upstream-master build is upstream's doing only when the as-published build was compared and lacks it
 	while IFS= read -r l; do
 		[[ -n $l ]] || continue
 		if [[ $as_ok == yes ]]; then
-			grep -qxF -- "$l" <<<"$as" || say MATERIAL "upstream Mk/ would change $l"
+			grep -qxF -- "$l" <<<"$as" || say MATERIAL "upstream master's framework would change $l"
 		else
-			say MATERIAL "a build with upstream Mk/ differs from the release in $l (the as-published build could not be compared)"
+			say MATERIAL "a build in upstream master's framework differs from the release in $l (the as-published build could not be compared)"
 		fi
 	done <<<"$rb"
 fi
@@ -94,7 +94,7 @@ if [[ $repo == . ]]; then
 	if [[ -z $rel ]]; then
 		say MATERIAL "cannot read the commit of release $tag: its source line holds no commit"
 	elif [[ -n $head && $head != "$rel"* && $rel != "$head"* ]]; then
-		say NOTE "the branch has commits after its release (release $rel, branch head $head)"
+		say NOTE "main has commits after its release (release $rel, main head $head)"
 	fi
 	exit "$material"
 fi

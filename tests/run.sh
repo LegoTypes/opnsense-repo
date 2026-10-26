@@ -2547,8 +2547,8 @@ cfdir() {
 cfdir
 expect_eq "findings: all the same" "$(fd)" "rc=0"
 mkpkg "$T/cf/rebased.pkg" "$(mod '.scripts["post-install"] = "echo new"')"
-expect_eq "findings: upstream Mk/ changes a script" "$(fd)" \
-	$'MATERIAL: upstream Mk/ would change script post-install: changed\nrc=1'
+expect_eq "findings: upstream master's framework changes a script" "$(fd)" \
+	$'MATERIAL: upstream master\'s framework would change script post-install: changed\nrc=1'
 cfdir
 mkpkg "$T/cf/fresh.pkg" "$(mod '.annotations.product_abi = "27.1"')"
 mkpkg "$T/cf/rebased.pkg" "$(mod '.annotations.product_abi = "27.1"')"
@@ -2558,18 +2558,18 @@ cfdir
 rm "$T/cf/fresh.pkg"
 echo "make: error 1" >"$T/cf/fresh.tail"
 expect_eq "findings: a failed build is material, with the end of its log" "$(fd)" \
-	$'MATERIAL: building the branch as a publish would failed; the end of its log:\nLOG: make: error 1\nrc=1'
+	$'MATERIAL: building main as a publish would failed; the end of its log:\nLOG: make: error 1\nrc=1'
 cfdir
 echo "garbage" >"$T/cf/fresh.pkg"
 mkpkg "$T/cf/rebased.pkg" "$(mod '.annotations.product_abi = "27.1"')"
 expect_eq "findings: when the as-published build cannot be compared, rebased differences are not blamed on Mk/" "$(fd)" \
-	$'MATERIAL: the build as a publish would make it could not be compared with the release\nMATERIAL: a build with upstream Mk/ differs from the release in product_abi: "26.7" -> "27.1" (the as-published build could not be compared)\nrc=1'
+	$'MATERIAL: the build as a publish would make it could not be compared with the release\nMATERIAL: a build in upstream master\'s framework differs from the release in product_abi: "26.7" -> "27.1" (the as-published build could not be compared)\nrc=1'
 # the "." row keeps comparing the release's commit with the branch head's
 cfdir
 printf 'Built from Org/repo, vendor/v, commit 1111111aaaa (workflow run at 3333333cccc), in opnsense/plugins %s.\n\nsha256: x\n' "$pin" >"$T/cf/notes"
 echo "Built from Org/repo, vendor/v, commit 2222222bbbb (workflow run at 4444444dddd), in opnsense/plugins $pin." >"$T/cf/fresh.source"
 expect_eq "findings: the \".\" row: unreleased commits are a note" "$(fd os-vendor)" \
-	$'NOTE: the branch has commits after its release (release 1111111aaaa, branch head 2222222bbbb)\nrc=0'
+	$'NOTE: main has commits after its release (release 1111111aaaa, main head 2222222bbbb)\nrc=0'
 printf 'Built from Org/repo, vendor/v, in opnsense/plugins %s.\n\nsha256: x\n' "$pin" >"$T/cf/notes"
 expect_eq "findings: the \".\" row: a release whose notes hold no commit is MATERIAL" "$(fd os-vendor)" \
 	$'MATERIAL: cannot read the commit of release os-alpha-1.0: its source line holds no commit\nrc=1'
@@ -3392,7 +3392,7 @@ vreset
 po="$T/po"
 rm -rf "$po" && mkdir -p "$po"
 cp "$vp/alpha.pkg" "$po/os-alpha-1.0.pkg"
-printf 'Built from Org/plugins, branch br-alpha, commit %s.\n' "$commit" >"$po/source"
+printf 'Built from Org/plugins, net/alpha, commit %s, in opnsense/plugins %s.\n' "$commit" "$pin" >"$po/source"
 printf 'abi: FreeBSD:15:amd64\nseries: 26.7\nfreebsd: 15.1-RELEASE-p3\nphp: 85\npython: 313\n' >"$po/build"
 rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 pl() { COMMIT="${PCOMMIT-$commit}" bash "$S/payload.sh" os-alpha "$po" "$vp/net/alpha"; }
@@ -3507,7 +3507,7 @@ soset() {
 	cp "$vp/alpha.pkg" "$so/os-alpha-1.0.pkg"
 	printf 'Built from the VM, which no one reads.\n' >"$so/source"
 	printf 'abi: FreeBSD:15:amd64\nseries: 26.7\nfreebsd: 15.1-RELEASE-p3\nphp: 85\npython: 313\n' >"$so/build"
-	printf 'Built from Org/plugins, branch br-alpha, commit %s.\n' "$commit" >"$sr/source"
+	printf 'Built from Org/plugins, net/alpha, commit %s, in opnsense/plugins %s.\n' "$commit" "$pin" >"$sr/source"
 	printf 'abi: FreeBSD:15:amd64\nseries: 26.7\nfreebsd: 15.1-RELEASE-p3 (reported by the build VM)\nphp: 85\npython: 313\n' >"$sr/build"
 	printf 'built os-alpha-1.0.pkg %s\ncommit %s\n' "$(sum "$so/os-alpha-1.0.pkg")" "$commit" >"$sr/manifest"
 }
