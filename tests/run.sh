@@ -2574,6 +2574,21 @@ printf 'Built from Org/repo, vendor/v, in opnsense/plugins %s.\n\nsha256: x\n' "
 expect_eq "findings: the \".\" row: a release whose notes hold no commit is MATERIAL" "$(fd os-vendor)" \
 	$'MATERIAL: cannot read the commit of release os-alpha-1.0: its source line holds no commit\nrc=1'
 expect_eq "findings: the \".\" row reads no tree" "$(wc -c <"$STUB/api_calls" | tr -d ' ')" "0"
+# the release notes shapes live when the canary first reads them (first lines, verbatim)
+live_vendor='Built from LegoTypes/opnsense-repo, vendor/legotypes, commit 34396b719ec8f9c32efb6c976212e61659f652f4 (workflow run at d8c3ad9c0bceaaa624ca2c8f31a9d07c57bf611c), in LegoTypes/plugins master 3afd667df9bc8043d6b1a578bd63b6e4b49616d8.'
+cfdir
+printf '%s\n\nabi: FreeBSD:15:amd64\n' "$live_vendor" >"$T/cf/notes"
+echo "Built from LegoTypes/opnsense-repo, vendor/legotypes, commit 34396b719ec8f9c32efb6c976212e61659f652f4 (workflow run at 5555555555555555555555555555555555555555), in opnsense/plugins $pin." >"$T/cf/fresh.source"
+echo os-legotypes-1.2 >"$T/cf/tag"
+expect_eq "findings: the live os-legotypes release line, the same commit as the fresh build's: no NOTE, no MATERIAL" \
+	"$(fd os-vendor) $(wc -c <"$STUB/api_calls" | tr -d ' ')" "rc=0 0"
+# a plugin release as it is live: the retired fork's branch and commit, which the repository does not hold
+live_mac=aff7dd2f49646aff8e8ac6fef89dbd116e54da47
+cfdir
+printf 'Built from LegoTypes/plugins, branch add-mac-alias-cache, commit %s.\n\nsha256: x\n' "$live_mac" >"$T/cf/notes"
+echo os-mac-alias-cache-1.1_1 >"$T/cf/tag"
+expect_eq "findings: the live plugin release line, its commit absent (git/commits 404): the NOTE alone" "$(fd)" \
+	$'NOTE: release os-mac-alias-cache-1.1_1 was built from a commit this repository does not hold (the retired fork); its next publish replaces it\nrc=0'
 cfdir
 rm "$T/cf/published.pkg" "$T/cf/notes"
 expect_eq "findings: no release yet is a note" "$(fd)" $'NOTE: os-alpha has no release yet; nothing to compare\nrc=0'
