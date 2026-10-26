@@ -4,8 +4,9 @@
 # each catalogue package fetch its newest release beside the fresh builds, write
 # its findings and keep its issue in step; then the same for the upstream series
 # and FreeBSD ABI, and for verify-payload.sh's copies of opnsense/plugins' Templates/
-# and Keywords/ (canary-constants.sh). Exits 1 if anything was material, so the run fails and GitHub
-# mails the owner; 2 if it cannot run at all.
+# and Keywords/ (canary-constants.sh: in the pinned framework and at upstream master).
+# Exits 1 if anything was material, so the run fails and GitHub mails the owner; 2 if
+# it cannot run at all.
 # gh takes the repository from GH_REPO and the token from GH_TOKEN.
 set -euo pipefail
 
@@ -31,7 +32,7 @@ for p in $catalogue; do
 	fetched=yes
 	if [[ -n $tag ]]; then
 		if gh release download "$tag" --pattern "$tag.pkg" --dir "$d" && mv "$d/$tag.pkg" "$d/published.pkg" &&
-			gh release view "$tag" --json body --jq .body >"$d/notes"; then :; else fetched=no; fi
+			gh release view "$tag" --json body --jq .body >"$d/notes" && printf '%s\n' "$tag" >"$d/tag"; then :; else fetched=no; fi
 	fi
 	if [[ $fetched == no ]]; then
 		# this week's comparison is impossible; say so in the issue instead of stopping every report

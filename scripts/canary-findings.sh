@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 # canary-findings.sh <package> <dir>
 # One package's canary findings, from what the canary gathered in <dir>:
-#   published.pkg, notes          its newest release and that release's notes
-#   fresh.pkg, fresh.source       a build of the branch head as a publish would make it
+#   published.pkg, notes, tag     its newest release (notes: the source line first), and its tag
+#   fresh.pkg, fresh.source       a build of main's head as a publish would make it
 #   rebased.pkg                   the same in opnsense/plugins master's head, not the pin
 #   fresh.tail, rebased.tail      the end of a failed build's log, instead of its .pkg
 # Prints "MATERIAL: ..." lines (a rebuild, a rebase or a look is needed) and
 # "NOTE: ..." lines (for information). Exits 1 if any line is MATERIAL.
+# A plugin package's NOTE is by directory: the tree of the package's directory at the commit the release's
+# source line names, against its tree at main's head (gh api git/trees, read on the runner, no clone), and the
+# newest commit that changed the directory. A call's status is its HTTP status line (gh api -i), never gh's
+# exit code. Only the release commit's tree may answer 404, a NOTE (the commit is not in the repository: it
+# was built in the retired fork); a 403, 429 or 5xx on any call, a truncated tree, or a 404 on main, is
+# MATERIAL "cannot read". The "." row (this repository's own package) compares the release's commit with
+# fresh.source's.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -71,9 +78,89 @@ if [[ -f $d/rebased.pkg ]]; then
 	done <<<"$rb"
 fi
 
-head=$(sed -n 's/.*commit \([0-9a-f]\{7,40\}\).*/\1/p' "$d/fresh.source" 2>/dev/null | head -n 1 || true)
-rel=$(sed -n '1s/.*commit \([0-9a-f]\{7,40\}\).*/\1/p' "$d/notes" 2>/dev/null || true)
-if [[ -n $head && -n $rel && $head != "$rel"* && $rel != "$head"* ]]; then
-	say NOTE "the branch has commits after its release (release $rel, branch head $head)"
+row=$(sh "$here/packages.sh" row "$pkg") || {
+	echo "canary-findings.sh: $pkg is not in packages.conf" >&2
+	exit 2
+}
+read -r repo _ dir _ <<<"$row"
+tag=$(head -n 1 "$d/tag" 2>/dev/null || true)
+tag=${tag:-$pkg}
+
+if [[ $repo == . ]]; then
+	head=$(sed -n 's/.*commit \([0-9a-f]\{7,40\}\).*/\1/p' "$d/fresh.source" 2>/dev/null | head -n 1 || true)
+	rel=$(sed -n '1s/.*commit \([0-9a-f]\{7,40\}\).*/\1/p' "$d/notes" 2>/dev/null || true)
+	if [[ -n $head && -n $rel && $head != "$rel"* && $rel != "$head"* ]]; then
+		say NOTE "the branch has commits after its release (release $rel, branch head $head)"
+	fi
+	exit "$material"
+fi
+
+# the release's commit: the one "commit <40 hex digits>" of the source line, the first line of the notes
+src=$(head -n 1 "$d/notes" 2>/dev/null || true)
+rel=$(grep -oE 'commit [0-9a-f]{40}([^0-9a-f]|$)' <<<"$src" | sed 's/^commit \([0-9a-f]*\).*/\1/') || rel=''
+if [[ $(grep -oEw 'commit' <<<"$src" | wc -l | tr -d ' ') != 1 || $(wc -l <<<"$rel" | tr -d ' ') != 1 || ${#rel} != 40 ]]; then
+	say MATERIAL "cannot read the commit of release $tag: its source line must hold exactly one commit <40 hex digits>"
+	exit "$material"
+fi
+
+# ghi <endpoint>: gh api -i; sets code (three digits, or empty with no status line), stat (for a message) and body
+ghi() {
+	local out first
+	out=$(gh api -i "$1" 2>/dev/null) || true
+	first=$(head -n 1 <<<"$out" | tr -d '\r')
+	code=$(awk '$1 ~ /^HTTP/ && $2 ~ /^[0-9][0-9][0-9]$/ { print $2 }' <<<"$first")
+	body=$(awk 'f { print } !f && /^\r?$/ { f = 1 }' <<<"$out")
+	stat=${code:+HTTP $code}
+	stat=${stat:-no HTTP status}
+}
+# tree_of <ref> <what>: the sha of $dir's tree at <ref> in $repo into tsha; returns 1 with a MATERIAL line when it
+# cannot be read, 2 when the status is 404 (the caller decides what that means)
+tsha=''
+tree_of() {
+	local why=''
+	ghi "repos/$repo/git/trees/$1?recursive=1"
+	if [[ $code == 404 ]]; then return 2; fi
+	if [[ $code != 200 ]]; then
+		why="$stat"
+	elif [[ $(jq -r '.truncated' <<<"$body" 2>/dev/null) != false ]]; then
+		why="the answer is truncated"
+	else
+		tsha=$(jq -r --arg p "$dir" '[.tree[]? | select(.path == $p and .type == "tree") | .sha | strings | select(test("\\A[0-9a-f]+\\z"))] | if length == 1 then .[0] else empty end' \
+			<<<"$body" 2>/dev/null) || tsha=''
+		[[ -n $tsha ]] || why="no such directory in the tree"
+	fi
+	if [[ -n $why ]]; then
+		say MATERIAL "cannot read $dir at $2 in $repo ($why)"
+		return 1
+	fi
+}
+rc=0
+tree_of "$rel" "the commit ${rel:0:9} of release $tag" || rc=$?
+if ((rc == 2)); then
+	say NOTE "release $tag was built from a commit this repository does not hold (the retired fork); its next publish replaces it"
+	exit "$material"
+fi
+((rc == 0)) || exit "$material"
+at_release=$tsha
+rc=0
+# a 404 on main is "cannot read", never the NOTE above
+tree_of main main || rc=$?
+if ((rc == 2)); then
+	say MATERIAL "cannot read $dir at main in $repo (HTTP 404)"
+	exit "$material"
+fi
+((rc == 0)) || exit "$material"
+if [[ $tsha != "$at_release" ]]; then
+	ghi "repos/$repo/commits?sha=main&path=$dir&per_page=1"
+	if [[ $code != 200 ]]; then
+		say MATERIAL "cannot read the newest commit that changed $dir on main in $repo ($stat)"
+	else
+		newest=$(jq -r '[.[]? | .sha | strings | select(test("\\A[0-9a-f]{40}\\z"))] | .[0] // empty' <<<"$body" 2>/dev/null) || newest=''
+		if [[ -z $newest ]]; then
+			say MATERIAL "cannot read the newest commit that changed $dir on main in $repo (no commit in the answer)"
+		else
+			say NOTE "$dir has changed on main since release $tag (built from ${rel:0:9}); the newest change is ${newest:0:9}"
+		fi
+	fi
 fi
 exit "$material"

@@ -526,7 +526,7 @@ expect_eq "writers: a build job step writing the summary is found" "$(writers "$
 export PATH="$root/tests/stub:$PATH" GH_REPO=Org/repo
 unset GITHUB_SHA
 sum() { sha256sum "$1" | awk '{print $1}'; }
-# Templates/ and Keywords/ of opnsense/plugins and LegoTypes/plugins master as gh api serves them (the listing of
+# Templates/ and Keywords/ of opnsense/plugins at master and at the pin as gh api serves them (the listing of
 # each directory, and each file's content): the templates as they are there, and keyword files shaped as there
 # (a comment header, here a synthetic one) holding the flags and script bodies pkg create reads
 up_templates='[{"name":"actions.d","type":"file"},{"name":"configure","type":"file"},{"name":"models","type":"file"},
@@ -599,12 +599,15 @@ reset_stub() {
 	export STUB="$T/stub"
 	rm -rf "$STUB"
 	mkdir -p "$STUB/notes" "$STUB/assets"
-	for r in opnsense/plugins LegoTypes/plugins; do
-		mkdir -p "$STUB/contents/$r" "$STUB/raw/$r"
-		printf '%s\n' "$up_templates" >"$STUB/contents/$r/Templates"
-		printf '%s\n' "$up_keywords" >"$STUB/contents/$r/Keywords"
-		cp -R "$updir/Templates" "$updir/Keywords" "$STUB/raw/$r/"
+	# opnsense/plugins at master and at the pin; the pin is an ancestor of master (compare says ahead)
+	for ref in master "$pin"; do
+		mkdir -p "$STUB/contents/opnsense/plugins/$ref" "$STUB/raw/opnsense/plugins/$ref"
+		printf '%s\n' "$up_templates" >"$STUB/contents/opnsense/plugins/$ref/Templates"
+		printf '%s\n' "$up_keywords" >"$STUB/contents/opnsense/plugins/$ref/Keywords"
+		cp -R "$updir/Templates" "$updir/Keywords" "$STUB/raw/opnsense/plugins/$ref/"
 	done
+	mkdir -p "$STUB/compare/opnsense/plugins" "$STUB/trees/Org/plugins" "$STUB/commits/Org/plugins"
+	printf '{"status":"ahead"}\n' >"$STUB/compare/opnsense/plugins/$pin...master.json"
 	: >"$STUB/tags"
 	echo '[]' >"$STUB/releases.json"
 	echo '[]' >"$STUB/issues.json"
@@ -2510,15 +2513,33 @@ expect_fail "copied: a file it holds no copy of" bash "$root/scripts/verify-payl
 expect_fail "copied: usage" bash "$root/scripts/verify-payload.sh" --copied Templates/actions.d x
 
 # --- canary-findings.sh and canary-report.sh ----------------------------------------
-fd() { bash "$root/scripts/canary-findings.sh" os-alpha "$T/cf"; echo "rc=$?"; }
+# a plugin row (os-alpha, Org/plugins, net/alpha) is compared by directory with the release's commit and main's head;
+# the "." row (os-vendor) with the build of the branch head
+conf 'os-alpha  Org/plugins  main  net/alpha  yes' \
+	'os-vendor .            main  vendor/v   yes'
+rel40=1111111111111111111111111111111111111111
+new40=2222222222222222222222222222222222222222
+fd() { bash "$S/canary-findings.sh" "${1:-os-alpha}" "$T/cf"; echo "rc=$?"; }
+# tree_json <sha of net/alpha> [<sha of dns/other>]: gh api git/trees/<sha>?recursive=1
+tree_json() {
+	jq -nc --arg a "$1" --arg o "${2:-o1}" '{sha: "t", truncated: false, tree: [
+		{path: "net", type: "tree", sha: "n1"}, {path: "net/alpha", type: "tree", sha: $a},
+		{path: "net/alpha/Makefile", type: "blob", sha: "b1"}, {path: "dns/other", type: "tree", sha: $o}]}'
+}
+# cfdir: a release of os-alpha built from $rel40, and a main whose net/alpha is the same tree
 cfdir() {
+	reset_stub
 	rm -rf "$T/cf"
 	mkdir -p "$T/cf"
 	mkpkg "$T/cf/published.pkg" "$base"
-	printf 'Built from Org/plugins, branch b, commit 1111111aaaa.\n\nsha256: x\n' >"$T/cf/notes"
+	printf 'Built from Org/plugins, net/alpha, commit %s, in opnsense/plugins %s.\n\nsha256: x\n' "$rel40" "$pin" >"$T/cf/notes"
+	echo os-alpha-1.0 >"$T/cf/tag"
 	mkpkg "$T/cf/fresh.pkg" "$base"
 	mkpkg "$T/cf/rebased.pkg" "$base"
-	echo "Built from Org/plugins, branch b, commit 1111111aaaa." >"$T/cf/fresh.source"
+	echo "Built from Org/plugins, net/alpha, commit $new40, in opnsense/plugins $pin." >"$T/cf/fresh.source"
+	tree_json a1 >"$STUB/trees/Org/plugins/$rel40.json"
+	tree_json a1 >"$STUB/trees/Org/plugins/main.json"
+	: >"$STUB/api_calls"
 }
 cfdir
 expect_eq "findings: all the same" "$(fd)" "rc=0"
@@ -2540,13 +2561,110 @@ echo "garbage" >"$T/cf/fresh.pkg"
 mkpkg "$T/cf/rebased.pkg" "$(mod '.annotations.product_abi = "27.1"')"
 expect_eq "findings: when the as-published build cannot be compared, rebased differences are not blamed on Mk/" "$(fd)" \
 	$'MATERIAL: the build as a publish would make it could not be compared with the release\nMATERIAL: a build with upstream Mk/ differs from the release in product_abi: "26.7" -> "27.1" (the as-published build could not be compared)\nrc=1'
+# the "." row keeps comparing the release's commit with the branch head's
 cfdir
-echo "Built from Org/plugins, branch b, commit 2222222bbbb." >"$T/cf/fresh.source"
-expect_eq "findings: unreleased commits are a note" "$(fd)" \
+printf 'Built from Org/repo, vendor/v, commit 1111111aaaa (workflow run at 3333333cccc), in opnsense/plugins %s.\n\nsha256: x\n' "$pin" >"$T/cf/notes"
+echo "Built from Org/repo, vendor/v, commit 2222222bbbb (workflow run at 4444444dddd), in opnsense/plugins $pin." >"$T/cf/fresh.source"
+expect_eq "findings: the \".\" row: unreleased commits are a note" "$(fd os-vendor)" \
 	$'NOTE: the branch has commits after its release (release 1111111aaaa, branch head 2222222bbbb)\nrc=0'
+expect_eq "findings: the \".\" row reads no tree" "$(wc -c <"$STUB/api_calls" | tr -d ' ')" "0"
 cfdir
 rm "$T/cf/published.pkg" "$T/cf/notes"
 expect_eq "findings: no release yet is a note" "$(fd)" $'NOTE: os-alpha has no release yet; nothing to compare\nrc=0'
+
+# by directory: the tree of net/alpha at the release's commit and at main's head
+cfdir
+tree_json a1 o2 >"$STUB/trees/Org/plugins/main.json"
+expect_eq "canary NOTE: silent when only another directory changed on main" "$(fd)" "rc=0"
+expect_eq "canary NOTE: the release commit's tree and main's were read, by the directory's entry" \
+	"$(cat "$STUB/api_calls")" "repos/Org/plugins/git/trees/$rel40?recursive=1
+repos/Org/plugins/git/trees/main?recursive=1"
+cfdir
+tree_json a2 >"$STUB/trees/Org/plugins/main.json"
+echo "[{\"sha\":\"abcdef0123456789abcdef0123456789abcdef01\"}]" >"$STUB/commits/Org/plugins/net_alpha.json"
+expect_eq "canary NOTE: names the newest commit that changed the directory" "$(fd)" \
+	$'NOTE: net/alpha has changed on main since release os-alpha-1.0 (built from 111111111); the newest change is abcdef012\nrc=0'
+expect_eq "canary NOTE: the newest commit is asked of main, for the directory, one" \
+	"$(tail -n 1 "$STUB/api_calls")" "repos/Org/plugins/commits?sha=main&path=net/alpha&per_page=1"
+# a release commit the repository does not hold: a NOTE, and only the release commit's lookup may say so
+cfdir
+echo 404 >"$STUB/trees/Org/plugins/$rel40.json.status"
+expect_eq "canary NOTE: a release commit the repository does not hold" "$(fd)" \
+	$'NOTE: release os-alpha-1.0 was built from a commit this repository does not hold (the retired fork); its next publish replaces it\nrc=0'
+expect_eq "canary NOTE: a release commit the repository does not hold ends the directory comparison" \
+	"$(cat "$STUB/api_calls")" "repos/Org/plugins/git/trees/$rel40?recursive=1"
+for code in 403 429 500 502; do
+	cfdir
+	echo "$code" >"$STUB/trees/Org/plugins/$rel40.json.status"
+	expect_eq "canary: the release's tree answering $code is MATERIAL \"cannot read\"" "$(fd)" \
+		"MATERIAL: cannot read net/alpha at the commit 111111111 of release os-alpha-1.0 in Org/plugins (HTTP $code)
+rc=1"
+done
+cfdir
+jq '.truncated = true' <<<"$(tree_json a1)" >"$STUB/trees/Org/plugins/$rel40.json"
+expect_eq "canary: a truncated tree is MATERIAL \"cannot read\"" "$(fd)" \
+	"MATERIAL: cannot read net/alpha at the commit 111111111 of release os-alpha-1.0 in Org/plugins (the answer is truncated)
+rc=1"
+cfdir
+jq 'del(.tree[] | select(.path == "net/alpha"))' <<<"$(tree_json a1)" >"$STUB/trees/Org/plugins/$rel40.json"
+expect_eq "canary: a tree without the directory is MATERIAL \"cannot read\"" "$(fd)" \
+	"MATERIAL: cannot read net/alpha at the commit 111111111 of release os-alpha-1.0 in Org/plugins (no such directory in the tree)
+rc=1"
+for code in 404 403 429 500; do
+	cfdir
+	echo "$code" >"$STUB/trees/Org/plugins/main.json.status"
+	expect_eq "canary: main's tree answering $code is MATERIAL \"cannot read\", never a NOTE" "$(fd)" \
+		"MATERIAL: cannot read net/alpha at main in Org/plugins (HTTP $code)
+rc=1"
+done
+cfdir
+jq '.truncated = true' <<<"$(tree_json a1)" >"$STUB/trees/Org/plugins/main.json"
+expect_eq "canary: main's tree truncated is MATERIAL \"cannot read\"" "$(fd)" \
+	"MATERIAL: cannot read net/alpha at main in Org/plugins (the answer is truncated)
+rc=1"
+for code in 404 403 500; do
+	cfdir
+	tree_json a2 >"$STUB/trees/Org/plugins/main.json"
+	echo "$code" >"$STUB/commits/Org/plugins/net_alpha.json.status"
+	expect_eq "canary: the newest-commit lookup answering $code is MATERIAL \"cannot read\"" "$(fd)" \
+		"MATERIAL: cannot read the newest commit that changed net/alpha on main in Org/plugins (HTTP $code)
+rc=1"
+done
+cfdir
+tree_json a2 >"$STUB/trees/Org/plugins/main.json"
+echo '[]' >"$STUB/commits/Org/plugins/net_alpha.json"
+expect_eq "canary: no commit for a changed directory is MATERIAL \"cannot read\"" "$(fd)" \
+	"MATERIAL: cannot read the newest commit that changed net/alpha on main in Org/plugins (no commit in the answer)
+rc=1"
+# the status is the HTTP status line's, never gh's exit code: an exit 1 with a 200 line is read as the answer
+# (gh exits 1 for a 404 too), and a missing status line is "cannot read"
+cfdir
+printf '#!/bin/sh\nexit 1\n' >"$T/ghdead"
+mkdir -p "$T/ghshim"
+cp "$T/ghdead" "$T/ghshim/gh"
+chmod 755 "$T/ghshim/gh"
+expect_eq "canary: an answer with no status line is MATERIAL \"cannot read\"" "$(PATH="$T/ghshim:$PATH" fd)" \
+	"MATERIAL: cannot read net/alpha at the commit 111111111 of release os-alpha-1.0 in Org/plugins (no HTTP status)
+rc=1"
+# the source line's commit is read exactly: one "commit <40 hex digits>"
+for line in "Built from Org/plugins, net/alpha, in opnsense/plugins $pin." \
+	"Built from Org/plugins, net/alpha, commit $rel40, in opnsense/plugins $pin, commit $new40." \
+	"Built from Org/plugins, net/alpha, commit ${rel40:0:9}, in opnsense/plugins $pin." \
+	"Built from Org/plugins, net/alpha, commit ${rel40}0, in opnsense/plugins $pin." \
+	"Built from Org/plugins, net/alpha, commit ABCDEF0123456789ABCDEF0123456789ABCDEF01, in opnsense/plugins $pin." \
+	"Built from Org/plugins, net/alpha, commit $rel40 commit $rel40, in opnsense/plugins $pin."; do
+	cfdir
+	printf '%s\n\nsha256: x\n' "$line" >"$T/cf/notes"
+	expect_eq "canary-findings: the source line's commit is read exactly: [$line]" "$(fd)" \
+		"MATERIAL: cannot read the commit of release os-alpha-1.0: its source line must hold exactly one commit <40 hex digits>
+rc=1"
+	expect_eq "canary-findings: the source line's commit is read exactly: no tree is asked for" "$(wc -c <"$STUB/api_calls" | tr -d ' ')" "0"
+done
+cfdir
+printf '\n\nBuilt from Org/plugins, net/alpha, commit %s, in opnsense/plugins %s.\n' "$rel40" "$pin" >"$T/cf/notes"
+expect_eq "canary-findings: the source line's commit is read from the first line only" "$(fd)" \
+	"MATERIAL: cannot read the commit of release os-alpha-1.0: its source line must hold exactly one commit <40 hex digits>
+rc=1"
 
 crep() { bash "$root/scripts/canary-report.sh" "canary: os-alpha" "$T/findings" "https://run/1"; }
 reset_stub
@@ -2608,64 +2726,113 @@ rm "$STUB/fail_issues"
 echo '[{"number":7,"title":"canary: os-alpha"},{"number":9,"title":"canary: os-alpha"}]' >"$STUB/issues.json"
 expect_fail "report: two open issues with one title" crep
 
-# --- canary-constants.sh: verify-payload.sh's copies against both masters ----------------------------
+# --- canary-constants.sh: verify-payload.sh's copies against opnsense/plugins master and the pinned framework ----
 reset_stub
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 ccs() { bash "$S/canary-constants.sh"; echo "rc=$?"; }
-expect_eq "constants: both masters hold the copies (a keyword's comments aside)" "$(ccs)" "rc=0"
-sed 's/cp -p/cp -f/' "$updir/Keywords/shadow.ucl" >"$STUB/raw/LegoTypes/plugins/Keywords/shadow.ucl"
-expect_eq "constants: a keyword whose script body differs" "$(ccs)" \
-	$'MATERIAL: LegoTypes/plugins master\'s Keywords/shadow.ucl differs from verify-payload.sh\'s copy in its flags or script bodies\nrc=1'
-{ cat "$updir/Keywords/shadow.ucl"; printf 'post-deinstall: <<EOD\n  rm -f /tmp/x\nEOD\n'; } >"$STUB/raw/LegoTypes/plugins/Keywords/shadow.ucl"
+raw_pin="$STUB/raw/opnsense/plugins/$pin"
+raw_master="$STUB/raw/opnsense/plugins/master"
+pinlabel="the pinned opnsense/plugins $pin"
+expect_eq "constants: master and the pin hold the copies (a keyword's comments aside)" "$(ccs)" "rc=0"
+expect_eq "canary-constants: compares the copies with upstream master and with the pinned framework" \
+	"$(for r in master "$pin"; do for d in Templates Keywords; do grep -cxF "repos/opnsense/plugins/contents/$d?ref=$r" "$STUB/api_calls"; done; done | tr '\n' ' ')$(grep -cxF "repos/opnsense/plugins/compare/$pin...master?per_page=1" "$STUB/api_calls")" \
+	"1 1 1 1 1"
+expect_eq "canary-constants: no LegoTypes/plugins read" \
+	"$(grep -c 'LegoTypes' "$STUB/api_calls") $(grep -c 'LegoTypes/plugins' "$S/canary-constants.sh")" "0 0"
+# the pin's copies differing are material: a package built in the pin fails the payload check
+sed 's/cp -p/cp -f/' "$updir/Keywords/shadow.ucl" >"$raw_pin/Keywords/shadow.ucl"
+expect_eq "constants: a keyword whose script body differs at the pin" "$(ccs)" \
+	$'MATERIAL: '"$pinlabel"$'\'s Keywords/shadow.ucl differs from verify-payload.sh\'s copy in its flags or script bodies\nrc=1'
+{ cat "$updir/Keywords/shadow.ucl"; printf 'post-deinstall: <<EOD\n  rm -f /tmp/x\nEOD\n'; } >"$raw_pin/Keywords/shadow.ucl"
 expect_eq "constants: a keyword that adds to another script" "$(ccs)" \
-	$'MATERIAL: LegoTypes/plugins master\'s Keywords/shadow.ucl differs from verify-payload.sh\'s copy in its flags or script bodies\nrc=1'
-{ cat "$updir/Keywords/shadow.ucl"; printf 'preformat_arguments: true\n'; } >"$STUB/raw/LegoTypes/plugins/Keywords/shadow.ucl"
+	$'MATERIAL: '"$pinlabel"$'\'s Keywords/shadow.ucl differs from verify-payload.sh\'s copy in its flags or script bodies\nrc=1'
+{ cat "$updir/Keywords/shadow.ucl"; printf 'preformat_arguments: true\n'; } >"$raw_pin/Keywords/shadow.ucl"
 expect_eq "constants: a keyword with a key verify-payload.sh does not model" "$(ccs)" \
-	$'MATERIAL: LegoTypes/plugins master\'s Keywords/shadow.ucl is not in the form verify-payload.sh models (comments, actions: [file(1)], arguments: true and script bodies)\nrc=1'
-{ cat "$updir/Keywords/shadow.ucl"; printf 'actions: [file(1)]\n'; } >"$STUB/raw/LegoTypes/plugins/Keywords/shadow.ucl"
+	$'MATERIAL: '"$pinlabel"$'\'s Keywords/shadow.ucl is not in the form verify-payload.sh models (comments, actions: [file(1)], arguments: true and script bodies)\nrc=1'
+{ cat "$updir/Keywords/shadow.ucl"; printf 'actions: [file(1)]\n'; } >"$raw_pin/Keywords/shadow.ucl"
 expect_eq "constants: a keyword that repeats a flag" "$(ccs)" \
-	$'MATERIAL: LegoTypes/plugins master\'s Keywords/shadow.ucl is not in the form verify-payload.sh models (comments, actions: [file(1)], arguments: true and script bodies)\nrc=1'
-{ printf '# \000\n'; cat "$updir/Keywords/shadow.ucl"; } >"$STUB/raw/LegoTypes/plugins/Keywords/shadow.ucl"
+	$'MATERIAL: '"$pinlabel"$'\'s Keywords/shadow.ucl is not in the form verify-payload.sh models (comments, actions: [file(1)], arguments: true and script bodies)\nrc=1'
+{ printf '# \000\n'; cat "$updir/Keywords/shadow.ucl"; } >"$raw_pin/Keywords/shadow.ucl"
 expect_eq "constants: a keyword with a NUL in a comment" "$(ccs)" \
-	$'MATERIAL: LegoTypes/plugins master\'s Keywords/shadow.ucl is not in the form verify-payload.sh models (comments, actions: [file(1)], arguments: true and script bodies)\nrc=1'
+	$'MATERIAL: '"$pinlabel"$'\'s Keywords/shadow.ucl is not in the form verify-payload.sh models (comments, actions: [file(1)], arguments: true and script bodies)\nrc=1'
 reset_stub
-touch "$STUB/raw/opnsense/plugins/Templates/models.stream"
+touch "$STUB/raw/opnsense/plugins/master/Templates/models.stream"
 expect_eq "constants: a 50 MB file is reported over 64 KiB, its download cut off" "$(ccs) $(cat "$STUB/stream")" \
 	$'MATERIAL: opnsense/plugins master\'s Templates/models is over 64 KiB: it was not compared\nrc=1 cut'
 reset_stub
-printf '# a new first line\n' | cat - "$updir/Keywords/sample.ucl" >"$STUB/raw/opnsense/plugins/Keywords/sample.ucl"
+printf '# a new first line\n' | cat - "$updir/Keywords/sample.ucl" >"$STUB/raw/opnsense/plugins/master/Keywords/sample.ucl"
+printf '# a new first line\n' | cat - "$updir/Keywords/sample.ucl" >"$STUB/raw/opnsense/plugins/$pin/Keywords/sample.ucl"
 expect_eq "constants: a keyword whose comments change is not reported" "$(ccs)" "rc=0"
-printf 'if true; then /usr/local/etc/rc.d/configd restart; fi\n' >"$STUB/raw/opnsense/plugins/Templates/actions.d"
-expect_eq "constants: a template that differs" "$(ccs)" \
-	$'MATERIAL: opnsense/plugins master\'s Templates/actions.d differs from verify-payload.sh\'s copy\nrc=1'
+printf 'if true; then /usr/local/etc/rc.d/configd restart; fi\n' >"$STUB/raw/opnsense/plugins/$pin/Templates/actions.d"
+expect_eq "constants: a template that differs at the pin" "$(ccs)" \
+	$'MATERIAL: '"$pinlabel"$'\'s Templates/actions.d differs from verify-payload.sh\'s copy\nrc=1'
+# master past the pin: a NOTE naming both; a difference the pin shows too is not blamed on master
 reset_stub
-head -c 70000 /dev/zero | tr '\0' '#' >"$STUB/raw/opnsense/plugins/Keywords/sample.ucl"
-rm "$STUB/raw/LegoTypes/plugins/Templates/models"
+printf 'if true; then /usr/local/etc/rc.d/configd restart; fi\n' >"$raw_master/Templates/actions.d"
+expect_eq "canary-constants: upstream master past the pin is a NOTE naming both" "$(ccs)" \
+	$'NOTE: opnsense/plugins master\'s Templates/actions.d differs from verify-payload.sh\'s copy; master is past the pinned framework '"$pin"$'\nrc=0'
+sed 's/cp -p/cp -f/' "$updir/Keywords/shadow.ucl" >"$raw_master/Keywords/shadow.ucl"
+jq -c '. + [{name: "pkgdeps.ucl", type: "file"}]' <<<"$up_keywords" >"$STUB/contents/opnsense/plugins/master/Keywords"
+expect_eq "canary-constants: master's other differences are NOTEs too" "$(ccs)" \
+	$'NOTE: opnsense/plugins master\'s Templates/actions.d differs from verify-payload.sh\'s copy; master is past the pinned framework '"$pin"$'\nNOTE: opnsense/plugins master\'s Keywords/ holds pkgdeps.ucl, which verify-payload.sh has no copy of; master is past the pinned framework '"$pin"$'\nNOTE: opnsense/plugins master\'s Keywords/shadow.ucl differs from verify-payload.sh\'s copy in its flags or script bodies; master is past the pinned framework '"$pin"$'\nrc=0'
+cp "$raw_master/Templates/actions.d" "$raw_pin/Templates/actions.d"
+expect_eq "constants: a difference the pin shows too is reported once, for the pin" \
+	"$(ccs | grep -c "Templates/actions.d")" "1"
+reset_stub
+head -c 70000 /dev/zero | tr '\0' '#' >"$raw_master/Keywords/sample.ucl"
+rm "$raw_pin/Templates/models"
 expect_eq "constants: a file too large or that cannot be read" "$(ccs)" \
-	$'MATERIAL: opnsense/plugins master\'s Keywords/sample.ucl is over 64 KiB: it was not compared\nMATERIAL: cannot read Templates/models of LegoTypes/plugins master: it was not compared\nrc=1'
+	$'MATERIAL: cannot read Templates/models of '"$pinlabel"$': it was not compared\nMATERIAL: opnsense/plugins master\'s Keywords/sample.ucl is over 64 KiB: it was not compared\nrc=1'
 reset_stub
-jq -c '. + [{name: "pkgdeps.ucl", type: "file"}]' <<<"$up_keywords" >"$STUB/contents/opnsense/plugins/Keywords"
-expect_eq "constants: a file master adds" "$(ccs)" \
-	$'MATERIAL: opnsense/plugins master\'s Keywords/ holds pkgdeps.ucl, which verify-payload.sh has no copy of\nrc=1'
-jq -c 'map(select(.name != "rc.loader.d"))' <<<"$up_templates" >"$STUB/contents/opnsense/plugins/Templates"
+jq -c '. + [{name: "pkgdeps.ucl", type: "file"}]' <<<"$up_keywords" >"$STUB/contents/opnsense/plugins/$pin/Keywords"
+expect_eq "constants: a file the pin adds" "$(ccs)" \
+	$'MATERIAL: '"$pinlabel"$'\'s Keywords/ holds pkgdeps.ucl, which verify-payload.sh has no copy of\nrc=1'
+jq -c 'map(select(.name != "rc.loader.d"))' <<<"$up_templates" >"$STUB/contents/opnsense/plugins/$pin/Templates"
 jq -c '. + [{name: "a`b", type: "file"}, {name: "x\tfile\tshadow.ucl", type: "file"}, {name: "y\nfile shadow.ucl", type: "file"}, {name: "shadow.ucl\n", type: "file"}]' \
-	<<<"$up_keywords" >"$STUB/contents/opnsense/plugins/Keywords"
-expect_eq "constants: a file master lacks, and names that are not plain, a tab or a newline in them" "$(ccs)" \
-	"MATERIAL: opnsense/plugins master's Templates/ lacks rc.loader.d, which verify-payload.sh copies
-MATERIAL: opnsense/plugins master's Keywords/ holds a file whose name is not plain, which verify-payload.sh has no copy of
-MATERIAL: opnsense/plugins master's Keywords/ holds a file whose name is not plain, which verify-payload.sh has no copy of
-MATERIAL: opnsense/plugins master's Keywords/ holds a file whose name is not plain, which verify-payload.sh has no copy of
-MATERIAL: opnsense/plugins master's Keywords/ holds a file whose name is not plain, which verify-payload.sh has no copy of
+	<<<"$up_keywords" >"$STUB/contents/opnsense/plugins/$pin/Keywords"
+expect_eq "constants: a file the pin lacks, and names that are not plain, a tab or a newline in them" "$(ccs)" \
+	"MATERIAL: $pinlabel's Templates/ lacks rc.loader.d, which verify-payload.sh copies
+MATERIAL: $pinlabel's Keywords/ holds a file whose name is not plain, which verify-payload.sh has no copy of
+MATERIAL: $pinlabel's Keywords/ holds a file whose name is not plain, which verify-payload.sh has no copy of
+MATERIAL: $pinlabel's Keywords/ holds a file whose name is not plain, which verify-payload.sh has no copy of
+MATERIAL: $pinlabel's Keywords/ holds a file whose name is not plain, which verify-payload.sh has no copy of
 rc=1"
 reset_stub
-jq -c '(.[] | select(.name == "models") | .type) = "dir"' <<<"$up_templates" >"$STUB/contents/LegoTypes/plugins/Templates"
-jq -c '(.[] | select(.name == "shadow.ucl") | .type) = "file\nfile"' <<<"$up_keywords" >"$STUB/contents/LegoTypes/plugins/Keywords"
-expect_eq "constants: a copied name that is a directory, or of a type that is not plain" "$(ccs)" \
-	$'MATERIAL: LegoTypes/plugins master\'s Templates/models is not a file (dir)\nMATERIAL: LegoTypes/plugins master\'s Keywords/shadow.ucl is not a file (a type that is not plain)\nrc=1'
+jq -c '(.[] | select(.name == "models") | .type) = "dir"' <<<"$up_templates" >"$STUB/contents/opnsense/plugins/$pin/Templates"
+jq -c '(.[] | select(.name == "shadow.ucl") | .type) = "file\nfile"' <<<"$up_keywords" >"$STUB/contents/opnsense/plugins/master/Keywords"
+expect_eq "constants: a copied name that is a directory at the pin, or of a type that is not plain at master" "$(ccs)" \
+	$'MATERIAL: '"$pinlabel"$'\'s Templates/models is not a file (dir)\nNOTE: opnsense/plugins master\'s Keywords/shadow.ucl is not a file (a type that is not plain); master is past the pinned framework '"$pin"$'\nrc=1'
 reset_stub
-rm "$STUB/contents/opnsense/plugins/Templates"
-printf 'not json\n' >"$STUB/contents/LegoTypes/plugins/Keywords"
+rm "$STUB/contents/opnsense/plugins/master/Templates"
+printf 'not json\n' >"$STUB/contents/opnsense/plugins/$pin/Keywords"
 expect_eq "constants: listings that cannot be read" "$(ccs)" \
-	$'MATERIAL: cannot read Templates/ of opnsense/plugins master: its copies were not compared\nMATERIAL: cannot read Keywords/ of LegoTypes/plugins master: its copies were not compared\nrc=1'
+	$'MATERIAL: cannot read Keywords/ of '"$pinlabel"$': its copies were not compared\nMATERIAL: cannot read Templates/ of opnsense/plugins master: its copies were not compared\nrc=1'
+# the pin must be an ancestor of master: ahead or identical passes; diverged, behind, 404 and an unreadable answer do not
+reset_stub
+printf '{"status":"identical"}\n' >"$STUB/compare/opnsense/plugins/$pin...master.json"
+expect_eq "canary-constants: a pinned FRAMEWORK identical to master passes" "$(ccs)" "rc=0"
+for st in diverged behind; do
+	printf '{"status":"%s"}\n' "$st" >"$STUB/compare/opnsense/plugins/$pin...master.json"
+	expect_eq "canary-constants: a pinned FRAMEWORK that is not an ancestor of upstream master is MATERIAL ($st)" "$(ccs)" \
+		"MATERIAL: the pinned framework $pin is not an ancestor of opnsense/plugins master (compare says $st)
+rc=1"
+done
+printf '{"status":"surprise\\nahead"}\n' >"$STUB/compare/opnsense/plugins/$pin...master.json"
+expect_eq "canary-constants: a compare status that is not plain is MATERIAL" "$(ccs)" \
+	"MATERIAL: the pinned framework $pin is not an ancestor of opnsense/plugins master (compare says something that is not plain)
+rc=1"
+for code in 404 403 500; do
+	reset_stub
+	echo "$code" >"$STUB/compare/opnsense/plugins/$pin...master.json.status"
+	expect_eq "canary-constants: a pinned FRAMEWORK that is not an ancestor of upstream master is MATERIAL (compare answers $code)" "$(ccs)" \
+		"MATERIAL: cannot compare the pinned framework $pin with opnsense/plugins master (HTTP $code)
+rc=1"
+done
+reset_stub
+rm "$STUB/compare/opnsense/plugins/$pin...master.json"
+expect_eq "canary-constants: a pinned FRAMEWORK unknown to upstream (404) is MATERIAL" "$(ccs)" \
+	"MATERIAL: cannot compare the pinned framework $pin with opnsense/plugins master (HTTP 404)
+rc=1"
 reset_stub
 expect_eq "constants: usage" "$(bash "$S/canary-constants.sh" x 2>/dev/null; echo "rc=$?")" "rc=2"
 # an unexpected failure (here mktemp, as on a full disk) exits 2, never 1 without a finding
@@ -2712,17 +2879,22 @@ expect_eq "canary: the series issue names both" \
 	"$(grep -c -e 'ships series 27.1' -e 'publishes FreeBSD:16:amd64' "$STUB/issue_calls")" "2"
 reset_stub
 printf 'NEWEST=26.7\nNEXT_ABI=\nSERIES=26.7\nCORE=26.7.5\nPHP=85\nPYTHON=313\nFREEBSD=15.1\n' >"$cw/upstream.env"
-printf 'echo drifted\n' >"$STUB/raw/opnsense/plugins/Templates/models"
+printf 'echo drifted\n' >"$STUB/raw/opnsense/plugins/master/Templates/models"
+out=$(canary_run)
+expect_eq "canary: a template upstream master changed past the pin is a note, the series issue stays closed" \
+	"$out $(grep -c '^create|canary: upstream series|' "$STUB/issue_calls")" $'clean\nopened\nclean 0'
+reset_stub
+printf 'echo drifted\n' >"$STUB/raw/opnsense/plugins/$pin/Templates/models"
 out=$(canary_run)
 expect_eq "canary: a copied template that drifted opens the series issue" \
 	"$out $(grep -c '^create|canary: upstream series|' "$STUB/issue_calls")" $'clean\nopened\nopened 1'
 expect_eq "canary: the series issue names the drifted copy" \
-	"$(grep -c "opnsense/plugins master's Templates/models differs from verify-payload.sh's copy" "$STUB/issue_calls")" "1"
-rm "$STUB/contents/LegoTypes/plugins/Keywords"
+	"$(grep -c "the pinned opnsense/plugins $pin's Templates/models differs from verify-payload.sh's copy" "$STUB/issue_calls")" "1"
+rm "$STUB/contents/opnsense/plugins/$pin/Keywords"
 : >"$STUB/issue_calls"
 canary_run >/dev/null
 expect_eq "canary: a listing that cannot be read is reported in the series issue" \
-	"$(grep -c "cannot read Keywords/ of LegoTypes/plugins master" "$STUB/issue_calls")" "1"
+	"$(grep -c "cannot read Keywords/ of the pinned opnsense/plugins $pin" "$STUB/issue_calls")" "1"
 # canary-constants.sh exiting 1 with no MATERIAL line (or 2) never reads as clean: the series issue says so
 cp "$S/canary-constants.sh" "$T/constants.saved"
 for code in 1 2; do

@@ -5,12 +5,23 @@
 #   immutable/<tag>      present: gh release view <tag> --json isImmutable says true (else false)
 #   assets/<tag>/<file>  release assets
 #   tags                 existing git tags, one per line
-#   fail_api             present: gh api fails (but for contents/)
-#   contents/<owner>/<repository>/<directory>
-#                        gh api repos/<owner>/<repository>/contents/<directory>?ref=master (absent: HTTP 404)
-#   raw/<owner>/<repository>/<path>
+#   fail_api             present: the tag listing's gh api fails (the calls below are not affected)
+#   contents/<owner>/<repository>/<ref>/<directory>
+#                        gh api repos/<owner>/<repository>/contents/<directory>?ref=<ref>, any sha or branch
+#                        (absent: HTTP 404)
+#   raw/<owner>/<repository>/<ref>/<path>
 #                        the same with -H 'Accept: application/vnd.github.raw': the file's content, or with
 #                        <path>.stream present, 50 MB, and "whole" or "cut" appended to stream
+#   trees/<owner>/<repository>/<sha>.json
+#                        gh api repos/<owner>/<repository>/git/trees/<sha>?recursive=1 (<sha> may be main)
+#   commits/<owner>/<repository>/<directory, / as _>.json
+#                        gh api "repos/<owner>/<repository>/commits?sha=main&path=<directory>&per_page=1"
+#   compare/<owner>/<repository>/<base>...<head>.json
+#                        gh api repos/<owner>/<repository>/compare/<base>...<head>, read with --jq <filter>
+#   <fixture>.status     for contents, trees, commits and compare: present, it holds an HTTP status (404, 403,
+#                        429, 500) the call answers with, in the status line gh api -i prints, and in
+#                        the exit code (1)
+#   api_calls            every gh api endpoint called, one per line
 #   created              gh release create appends "<tag>|<file>|<target>" and the notes
 set -euo pipefail
 case "$1 $2" in
@@ -86,40 +97,107 @@ case "$1 $2" in
 "issue close")
 	printf 'close|%s|%s\n' "$3" "$5" >>"$STUB/issue_calls"
 	;;
-"api repos/"*"/contents/"*)
-	path=${2#repos/}
-	[[ $path == *'?ref=master' ]] || {
-		echo "stub gh: contents only at ref master: $2" >&2
-		exit 2
+"api "*)
+	shift
+	inc=no hdr='' jqf='' ep=''
+	while [[ $# -gt 0 ]]; do
+		case $1 in
+		-i) inc=yes && shift ;;
+		-H) hdr=$2 && shift 2 ;;
+		--jq) jqf=$2 && shift 2 ;;
+		*) ep=$1 && shift ;;
+		esac
+	done
+	printf '%s\n' "$ep" >>"$STUB/api_calls"
+	# answer <file>: the file's content, or the HTTP status its <file>.status holds (404 when the file is
+	# absent); with -i, as gh prints it: the status line, headers, a blank line, the body
+	answer() {
+		local f=$1 code=200 body
+		if [[ -f $f.status ]]; then
+			code=$(<"$f.status")
+			body='{"message":"stub"}'
+		elif [[ -f $f ]]; then
+			body=$(<"$f")
+		else
+			code=404
+			body='{"message":"Not Found"}'
+		fi
+		if [[ $inc == yes ]]; then
+			printf 'HTTP/2.0 %s Stub\r\ncontent-type: application/json\r\n\r\n%s\n' "$code" "$body"
+		elif ((code >= 400)); then
+			echo "HTTP $code" >&2
+			return 1
+		elif [[ -n $jqf ]]; then
+			jq -r "$jqf" <<<"$body"
+		else
+			printf '%s\n' "$body"
+		fi
+		[[ $code -lt 400 ]]
 	}
-	path=${path%'?ref=master'}
-	kind=contents
-	if [[ $# -gt 2 ]]; then
-		[[ $# -eq 4 && $3 == -H && $4 == 'Accept: application/vnd.github.raw' ]] || {
-			echo "stub gh: unsupported: $*" >&2
+	path=${ep#repos/}
+	case $path in
+	*/contents/*)
+		# contents/<dir>?ref=<sha or branch>, from $STUB/contents/<owner>/<repository>/<ref>/<dir>
+		[[ $path == *'?ref='* ]] || {
+			echo "stub gh: contents needs ?ref=: $ep" >&2
 			exit 2
 		}
-		kind=raw
-	fi
-	f="$STUB/$kind/${path%%/contents/*}/${path#*/contents/}"
-	if [[ $kind == raw && -f $f.stream ]]; then
-		# 50 MB of content: "whole" or "cut" (its reader stopped early) goes to $STUB/stream
-		if head -c 52428800 /dev/zero | tr '\0' '#'; then echo whole >>"$STUB/stream"; else echo cut >>"$STUB/stream"; fi
-		exit 0
-	fi
-	[[ -f $f ]] || {
-		echo "HTTP 404: Not Found" >&2
-		exit 1
-	}
-	cat "$f"
-	;;
-"api "*)
-	[[ ! -e $STUB/fail_api ]] || {
-		echo "HTTP 502" >&2
-		exit 1
-	}
-	prefix=${2##*/matching-refs/tags/}
-	awk -v p="$prefix" 'index($0, p) == 1' "$STUB/tags" | jq -R '{ref: ("refs/tags/" + .)}' | jq -s .
+		ref=${path#*'?ref='}
+		path=${path%'?ref='*}
+		kind=contents
+		if [[ -n $hdr ]]; then
+			[[ $hdr == 'Accept: application/vnd.github.raw' ]] || {
+				echo "stub gh: unsupported: $*" >&2
+				exit 2
+			}
+			kind=raw
+		fi
+		f="$STUB/$kind/${path%%/contents/*}/$ref/${path#*/contents/}"
+		if [[ $kind == raw && -f $f.stream ]]; then
+			# 50 MB of content: "whole" or "cut" (its reader stopped early) goes to $STUB/stream
+			if head -c 52428800 /dev/zero | tr '\0' '#'; then echo whole >>"$STUB/stream"; else echo cut >>"$STUB/stream"; fi
+			exit 0
+		fi
+		if [[ $kind == raw && ! -f $f ]]; then
+			echo "HTTP 404: Not Found" >&2
+			exit 1
+		fi
+		if [[ $kind == raw ]]; then cat "$f"; else answer "$f"; fi
+		;;
+	*/git/trees/*)
+		# git/trees/<sha>?recursive=1, from $STUB/trees/<owner>/<repository>/<sha>.json
+		[[ $path == *'?recursive=1' ]] || {
+			echo "stub gh: trees needs ?recursive=1: $ep" >&2
+			exit 2
+		}
+		path=${path%'?recursive=1'}
+		answer "$STUB/trees/${path%%/git/trees/*}/${path#*/git/trees/}.json"
+		;;
+	*/commits'?'*)
+		# commits?sha=<branch>&path=<dir>&per_page=1, from $STUB/commits/<owner>/<repository>/<dir, / as _>.json
+		q=${path#*'?'}
+		[[ $q == sha=main\&path=*\&per_page=1 ]] || {
+			echo "stub gh: unsupported commits query: $ep" >&2
+			exit 2
+		}
+		dir=${q#sha=main&path=}
+		dir=${dir%&per_page=1}
+		answer "$STUB/commits/${path%%/commits?*}/${dir//\//_}.json"
+		;;
+	*/compare/*)
+		# compare/<base>...<head>, from $STUB/compare/<owner>/<repository>/<base>...<head>.json
+		path=${path%%'?'*}
+		answer "$STUB/compare/${path%%/compare/*}/${path#*/compare/}.json"
+		;;
+	*)
+		[[ ! -e $STUB/fail_api ]] || {
+			echo "HTTP 502" >&2
+			exit 1
+		}
+		prefix=${ep##*/matching-refs/tags/}
+		awk -v p="$prefix" 'index($0, p) == 1' "$STUB/tags" | jq -R '{ref: ("refs/tags/" + .)}' | jq -s .
+		;;
+	esac
 	;;
 *)
 	echo "stub gh: unsupported: $*" >&2
