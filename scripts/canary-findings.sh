@@ -9,11 +9,13 @@
 # "NOTE: ..." lines (for information). Exits 1 if any line is MATERIAL.
 # A plugin package's NOTE is by directory: the tree of the package's directory at the commit the release's
 # source line names, against its tree at main's head (gh api git/trees, read on the runner, no clone), and the
-# newest commit that changed the directory. A call's status is its HTTP status line (gh api -i), never gh's
-# exit code. Only the release commit's tree may answer 404, a NOTE (the commit is not in the repository: it
-# was built in the retired fork); a 403, 429 or 5xx on any call, a truncated tree, or a 404 on main, is
-# MATERIAL "cannot read". The "." row (this repository's own package) compares the release's commit with
-# fresh.source's.
+# newest commit that changed the directory. Order: main's tree first (any failure is MATERIAL "cannot read",
+# so a repository that cannot be read is never the NOTE); then the release commit, by gh api git/commits/<sha>,
+# which answers 404 for a commit the repository does not hold (git/trees/<sha>?recursive=1 answers 422 there);
+# then the tree that commit names. A call's status is its HTTP status line (gh api -i), never gh's exit code.
+# Only the release commit's 404 is the NOTE; every other status (403, 429, 422, 5xx, ...), no status line, a
+# tree whose "truncated" is not false, or a missing directory is MATERIAL "cannot read". The "." row (this
+# repository's own package) compares the release's commit with fresh.source's.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -89,7 +91,9 @@ tag=${tag:-$pkg}
 if [[ $repo == . ]]; then
 	head=$(sed -n 's/.*commit \([0-9a-f]\{7,40\}\).*/\1/p' "$d/fresh.source" 2>/dev/null | head -n 1 || true)
 	rel=$(sed -n '1s/.*commit \([0-9a-f]\{7,40\}\).*/\1/p' "$d/notes" 2>/dev/null || true)
-	if [[ -n $head && -n $rel && $head != "$rel"* && $rel != "$head"* ]]; then
+	if [[ -z $rel ]]; then
+		say MATERIAL "cannot read the commit of release $tag: its source line holds no commit"
+	elif [[ -n $head && $head != "$rel"* && $rel != "$head"* ]]; then
 		say NOTE "the branch has commits after its release (release $rel, branch head $head)"
 	fi
 	exit "$material"
@@ -113,16 +117,15 @@ ghi() {
 	stat=${code:+HTTP $code}
 	stat=${stat:-no HTTP status}
 }
-# tree_of <ref> <what>: the sha of $dir's tree at <ref> in $repo into tsha; returns 1 with a MATERIAL line when it
-# cannot be read, 2 when the status is 404 (the caller decides what that means)
+# tree_of <ref> <what>: the sha of $dir's tree in the tree <ref> (main, or a tree sha) of $repo into tsha; returns 1
+# with a MATERIAL line, "cannot read $dir at <what>", when it cannot be read
 tsha=''
 tree_of() {
 	local why=''
 	ghi "repos/$repo/git/trees/$1?recursive=1"
-	if [[ $code == 404 ]]; then return 2; fi
 	if [[ $code != 200 ]]; then
-		why="$stat"
-	elif [[ $(jq -r '.truncated' <<<"$body" 2>/dev/null) != false ]]; then
+		why=$stat
+	elif [[ $(jq -r 'if .truncated == false then "complete" else "no" end' <<<"$body" 2>/dev/null) != complete ]]; then
 		why="the answer is truncated"
 	else
 		tsha=$(jq -r --arg p "$dir" '[.tree[]? | select(.path == $p and .type == "tree") | .sha | strings | select(test("\\A[0-9a-f]+\\z"))] | if length == 1 then .[0] else empty end' \
@@ -134,23 +137,25 @@ tree_of() {
 		return 1
 	fi
 }
-rc=0
-tree_of "$rel" "the commit ${rel:0:9} of release $tag" || rc=$?
-if ((rc == 2)); then
+tree_of main main || exit "$material"
+at_main=$tsha
+at="the commit ${rel:0:9} of release $tag"
+ghi "repos/$repo/git/commits/$rel"
+if [[ $code == 404 ]]; then
 	say NOTE "release $tag was built from a commit this repository does not hold (the retired fork); its next publish replaces it"
 	exit "$material"
 fi
-((rc == 0)) || exit "$material"
-at_release=$tsha
-rc=0
-# a 404 on main is "cannot read", never the NOTE above
-tree_of main main || rc=$?
-if ((rc == 2)); then
-	say MATERIAL "cannot read $dir at main in $repo (HTTP 404)"
+if [[ $code != 200 ]]; then
+	say MATERIAL "cannot read $dir at $at in $repo ($stat)"
 	exit "$material"
 fi
-((rc == 0)) || exit "$material"
-if [[ $tsha != "$at_release" ]]; then
+reltree=$(jq -r '.tree.sha | strings | select(test("\\A[0-9a-f]+\\z"))' <<<"$body" 2>/dev/null) || reltree=''
+if [[ -z $reltree ]]; then
+	say MATERIAL "cannot read $dir at $at in $repo (no tree in the commit)"
+	exit "$material"
+fi
+tree_of "$reltree" "$at" || exit "$material"
+if [[ $tsha != "$at_main" ]]; then
 	ghi "repos/$repo/commits?sha=main&path=$dir&per_page=1"
 	if [[ $code != 200 ]]; then
 		say MATERIAL "cannot read the newest commit that changed $dir on main in $repo ($stat)"

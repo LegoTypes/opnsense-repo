@@ -13,7 +13,12 @@
 #                        the same with -H 'Accept: application/vnd.github.raw': the file's content, or with
 #                        <path>.stream present, 50 MB, and "whole" or "cut" appended to stream
 #   trees/<owner>/<repository>/<sha>.json
-#                        gh api repos/<owner>/<repository>/git/trees/<sha>?recursive=1 (<sha> may be main)
+#                        gh api repos/<owner>/<repository>/git/trees/<sha>?recursive=1 (<sha> may be main).
+#                        As GitHub answers: an absent <sha> is HTTP 422 ("Invalid object requested"), an absent
+#                        main 404 (use <fixture>.status 404 for a repository that does not exist)
+#   gitcommits/<owner>/<repository>/<sha>.json
+#                        gh api repos/<owner>/<repository>/git/commits/<sha> (absent: HTTP 404, as GitHub answers
+#                        for a commit the repository does not hold)
 #   commits/<owner>/<repository>/<directory, / as _>.json
 #                        gh api "repos/<owner>/<repository>/commits?sha=main&path=<directory>&per_page=1"
 #   compare/<owner>/<repository>/<base>...<head>.json
@@ -155,14 +160,22 @@ case "$1 $2" in
 		f="$STUB/$kind/${path%%/contents/*}/$ref/${path#*/contents/}"
 		if [[ $kind == raw && -f $f.stream ]]; then
 			# 50 MB of content: "whole" or "cut" (its reader stopped early) goes to $STUB/stream
+			if [[ $inc == yes ]]; then printf 'HTTP/2.0 200 Stub\r\ncontent-type: text/plain\r\n\r\n'; fi
 			if head -c 52428800 /dev/zero | tr '\0' '#'; then echo whole >>"$STUB/stream"; else echo cut >>"$STUB/stream"; fi
 			exit 0
 		fi
-		if [[ $kind == raw && ! -f $f ]]; then
-			echo "HTTP 404: Not Found" >&2
-			exit 1
-		fi
-		if [[ $kind == raw ]]; then cat "$f"; else answer "$f"; fi
+		if [[ $kind == raw ]]; then
+			# the file's bytes as they are, after the headers with -i; <file>.status: that status, no body
+			code=200
+			[[ ! -f $f.status ]] || code=$(<"$f.status")
+			[[ -f $f || -f $f.status ]] || code=404
+			if [[ $inc == yes ]]; then printf 'HTTP/2.0 %s Stub\r\ncontent-type: text/plain\r\n\r\n' "$code"; fi
+			if ((code >= 400)); then
+				[[ $inc == yes ]] || echo "HTTP $code" >&2
+				exit 1
+			fi
+			cat "$f"
+		else answer "$f"; fi
 		;;
 	*/git/trees/*)
 		# git/trees/<sha>?recursive=1, from $STUB/trees/<owner>/<repository>/<sha>.json
@@ -171,7 +184,13 @@ case "$1 $2" in
 			exit 2
 		}
 		path=${path%'?recursive=1'}
-		answer "$STUB/trees/${path%%/git/trees/*}/${path#*/git/trees/}.json"
+		f="$STUB/trees/${path%%/git/trees/*}/${path#*/git/trees/}.json"
+		# GitHub answers 422, not 404, for a sha it does not hold when the tree is read recursively
+		if [[ ! -f $f && ! -f $f.status && $f != */main.json ]]; then echo 422 >"$f.status"; fi
+		answer "$f"
+		;;
+	*/git/commits/*)
+		answer "$STUB/gitcommits/${path%%/git/commits/*}/${path#*/git/commits/}.json"
 		;;
 	*/commits'?'*)
 		# commits?sha=<branch>&path=<dir>&per_page=1, from $STUB/commits/<owner>/<repository>/<dir, / as _>.json

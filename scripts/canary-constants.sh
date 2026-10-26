@@ -60,6 +60,25 @@ ghi() {
 	stat=${code:+HTTP $code}
 	stat=${stat:-no HTTP status}
 }
+# ghraw <endpoint> <file>: a file's raw content into <file>, byte for byte, with the status from gh api -i's status
+# line: sets code. The download is bounded: gh is cut off after 80 KiB (the headers and one byte past 64 KiB of
+# content at least), and a file larger than 64 KiB is reported over by its caller.
+ghraw() {
+	local first off
+	set +o pipefail
+	gh api -i "$1" -H 'Accept: application/vnd.github.raw' 2>/dev/null | head -c 81920 >"$work/raw"
+	set -o pipefail
+	first=$(head -n 1 "$work/raw" | tr -d '\r')
+	code=$(awk '$1 ~ /^HTTP/ && $2 ~ /^[0-9][0-9][0-9]$/ { print $2 }' <<<"$first")
+	# the content starts after the header block's empty line (a lone CR line; headers hold no NUL)
+	off=$(LC_ALL=C grep -abxm1 $'\r' "$work/raw" | cut -d: -f1) || off=''
+	if [[ -n $off ]]; then
+		tail -c +$((off + 3)) "$work/raw" >"$2"
+	else
+		: >"$2"
+		code=''
+	fi
+}
 # the pin must be an ancestor of master: ahead (master is past it) or identical
 ghi "repos/$repo/compare/$pin...master?per_page=1"
 if [[ $code != 200 ]]; then
@@ -87,7 +106,9 @@ for ref in "$pin" master; do
 	if [[ $ref == master ]]; then label="$repo master"; else label="the pinned $repo $pin"; fi
 	for d in Templates Keywords; do
 		# one tab-separated line per entry; a type or name that is not plain arrives empty, never as text
-		if ! listing=$(gh api "repos/$repo/contents/$d?ref=$ref" 2>/dev/null) ||
+		ghi "repos/$repo/contents/$d?ref=$ref"
+		listing=$body
+		if [[ $code != 200 ]] ||
 			! entries=$(jq -r 'if type == "array" then .[] else error("not a listing") end
 				| [((.type | strings | select(test("\\A[a-z]+\\z"))) // ""), ((.name | strings | select(test("\\A[A-Za-z0-9._+-]+\\z"))) // "")]
 				| @tsv' <<<"$listing" 2>/dev/null); then
@@ -120,15 +141,11 @@ for ref in "$pin" master; do
 			fi
 			# the download itself is bounded: one byte past 64 KiB says it is larger, and gh is cut off there
 			f=$work/upstream
-			set +o pipefail
-			gh api "repos/$repo/contents/$c?ref=$ref" -H 'Accept: application/vnd.github.raw' 2>/dev/null |
-				head -c 65537 >"$f"
-			got=("${PIPESTATUS[@]}")
-			set -o pipefail
-			if (($(wc -c <"$f") > 65536)); then
-				say "$label's $c is over 64 KiB: it was not compared"
-			elif ((got[0] != 0 || got[1] != 0)); then
+			ghraw "repos/$repo/contents/$c?ref=$ref" "$f"
+			if [[ $code != 200 ]]; then
 				say "cannot read $c of $label: it was not compared"
+			elif (($(wc -c <"$f") > 65536)); then
+				say "$label's $c is over 64 KiB: it was not compared"
 			elif [[ $c == Templates/* ]]; then
 				cmp -s "$f" "$work/copy/$c" || finding "$c" "$label's $c differs from verify-payload.sh's copy"
 			elif ! bash "$here/verify-payload.sh" --model "$f" >"$work/model" 2>/dev/null; then

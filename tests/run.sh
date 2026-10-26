@@ -2519,6 +2519,7 @@ conf 'os-alpha  Org/plugins  main  net/alpha  yes' \
 	'os-vendor .            main  vendor/v   yes'
 rel40=1111111111111111111111111111111111111111
 new40=2222222222222222222222222222222222222222
+reltree=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 fd() { bash "$S/canary-findings.sh" "${1:-os-alpha}" "$T/cf"; echo "rc=$?"; }
 # tree_json <sha of net/alpha> [<sha of dns/other>]: gh api git/trees/<sha>?recursive=1
 tree_json() {
@@ -2537,7 +2538,9 @@ cfdir() {
 	mkpkg "$T/cf/fresh.pkg" "$base"
 	mkpkg "$T/cf/rebased.pkg" "$base"
 	echo "Built from Org/plugins, net/alpha, commit $new40, in opnsense/plugins $pin." >"$T/cf/fresh.source"
-	tree_json a1 >"$STUB/trees/Org/plugins/$rel40.json"
+	mkdir -p "$STUB/gitcommits/Org/plugins"
+	echo "{\"sha\":\"$rel40\",\"tree\":{\"sha\":\"$reltree\"}}" >"$STUB/gitcommits/Org/plugins/$rel40.json"
+	tree_json a1 >"$STUB/trees/Org/plugins/$reltree.json"
 	tree_json a1 >"$STUB/trees/Org/plugins/main.json"
 	: >"$STUB/api_calls"
 }
@@ -2567,6 +2570,9 @@ printf 'Built from Org/repo, vendor/v, commit 1111111aaaa (workflow run at 33333
 echo "Built from Org/repo, vendor/v, commit 2222222bbbb (workflow run at 4444444dddd), in opnsense/plugins $pin." >"$T/cf/fresh.source"
 expect_eq "findings: the \".\" row: unreleased commits are a note" "$(fd os-vendor)" \
 	$'NOTE: the branch has commits after its release (release 1111111aaaa, branch head 2222222bbbb)\nrc=0'
+printf 'Built from Org/repo, vendor/v, in opnsense/plugins %s.\n\nsha256: x\n' "$pin" >"$T/cf/notes"
+expect_eq "findings: the \".\" row: a release whose notes hold no commit is MATERIAL" "$(fd os-vendor)" \
+	$'MATERIAL: cannot read the commit of release os-alpha-1.0: its source line holds no commit\nrc=1'
 expect_eq "findings: the \".\" row reads no tree" "$(wc -c <"$STUB/api_calls" | tr -d ' ')" "0"
 cfdir
 rm "$T/cf/published.pkg" "$T/cf/notes"
@@ -2576,9 +2582,10 @@ expect_eq "findings: no release yet is a note" "$(fd)" $'NOTE: os-alpha has no r
 cfdir
 tree_json a1 o2 >"$STUB/trees/Org/plugins/main.json"
 expect_eq "canary NOTE: silent when only another directory changed on main" "$(fd)" "rc=0"
-expect_eq "canary NOTE: the release commit's tree and main's were read, by the directory's entry" \
-	"$(cat "$STUB/api_calls")" "repos/Org/plugins/git/trees/$rel40?recursive=1
-repos/Org/plugins/git/trees/main?recursive=1"
+expect_eq "canary NOTE: main's tree, the release commit, and its tree were read, by the directory's entry" \
+	"$(cat "$STUB/api_calls")" "repos/Org/plugins/git/trees/main?recursive=1
+repos/Org/plugins/git/commits/$rel40
+repos/Org/plugins/git/trees/$reltree?recursive=1"
 cfdir
 tree_json a2 >"$STUB/trees/Org/plugins/main.json"
 echo "[{\"sha\":\"abcdef0123456789abcdef0123456789abcdef01\"}]" >"$STUB/commits/Org/plugins/net_alpha.json"
@@ -2586,27 +2593,61 @@ expect_eq "canary NOTE: names the newest commit that changed the directory" "$(f
 	$'NOTE: net/alpha has changed on main since release os-alpha-1.0 (built from 111111111); the newest change is abcdef012\nrc=0'
 expect_eq "canary NOTE: the newest commit is asked of main, for the directory, one" \
 	"$(tail -n 1 "$STUB/api_calls")" "repos/Org/plugins/commits?sha=main&path=net/alpha&per_page=1"
-# a release commit the repository does not hold: a NOTE, and only the release commit's lookup may say so
+# a release commit the repository does not hold: git/commits answers 404 (git/trees?recursive=1 answers 422, which
+# is "cannot read" like any other status), and only that 404 is the NOTE, after main has been read
 cfdir
-echo 404 >"$STUB/trees/Org/plugins/$rel40.json.status"
+rm "$STUB/gitcommits/Org/plugins/$rel40.json"
 expect_eq "canary NOTE: a release commit the repository does not hold" "$(fd)" \
 	$'NOTE: release os-alpha-1.0 was built from a commit this repository does not hold (the retired fork); its next publish replaces it\nrc=0'
-expect_eq "canary NOTE: a release commit the repository does not hold ends the directory comparison" \
-	"$(cat "$STUB/api_calls")" "repos/Org/plugins/git/trees/$rel40?recursive=1"
-for code in 403 429 500 502; do
+expect_eq "canary NOTE: a release commit the repository does not hold is asked of git/commits, after main" \
+	"$(cat "$STUB/api_calls")" "repos/Org/plugins/git/trees/main?recursive=1
+repos/Org/plugins/git/commits/$rel40"
+cfdir
+rm "$STUB/gitcommits/Org/plugins/$rel40.json" "$STUB/trees/Org/plugins/main.json"
+expect_eq "canary: a release commit not held, with main unreadable (a missing repository), is MATERIAL, not the NOTE" "$(fd)" \
+	"MATERIAL: cannot read net/alpha at main in Org/plugins (HTTP 404)
+rc=1"
+for code in 403 429 500 502 422; do
 	cfdir
-	echo "$code" >"$STUB/trees/Org/plugins/$rel40.json.status"
-	expect_eq "canary: the release's tree answering $code is MATERIAL \"cannot read\"" "$(fd)" \
+	echo "$code" >"$STUB/gitcommits/Org/plugins/$rel40.json.status"
+	expect_eq "canary: the release commit lookup answering $code is MATERIAL \"cannot read\"" "$(fd)" \
 		"MATERIAL: cannot read net/alpha at the commit 111111111 of release os-alpha-1.0 in Org/plugins (HTTP $code)
 rc=1"
 done
 cfdir
-jq '.truncated = true' <<<"$(tree_json a1)" >"$STUB/trees/Org/plugins/$rel40.json"
+echo "{\"sha\":\"$rel40\"}" >"$STUB/gitcommits/Org/plugins/$rel40.json"
+expect_eq "canary: a release commit without a tree is MATERIAL \"cannot read\"" "$(fd)" \
+	"MATERIAL: cannot read net/alpha at the commit 111111111 of release os-alpha-1.0 in Org/plugins (no tree in the commit)
+rc=1"
+for code in 404 403 429 500 502 422; do
+	cfdir
+	echo "$code" >"$STUB/trees/Org/plugins/$reltree.json.status"
+	expect_eq "canary: the release's tree answering $code is MATERIAL \"cannot read\", never the NOTE" "$(fd)" \
+		"MATERIAL: cannot read net/alpha at the commit 111111111 of release os-alpha-1.0 in Org/plugins (HTTP $code)
+rc=1"
+done
+cfdir
+rm "$STUB/trees/Org/plugins/$reltree.json"
+expect_eq "canary: a stray 422 from the trees API (the tree is not held) is MATERIAL \"cannot read\"" "$(fd)" \
+	"MATERIAL: cannot read net/alpha at the commit 111111111 of release os-alpha-1.0 in Org/plugins (HTTP 422)
+rc=1"
+cfdir
+jq '.truncated = true' <<<"$(tree_json a1)" >"$STUB/trees/Org/plugins/$reltree.json"
 expect_eq "canary: a truncated tree is MATERIAL \"cannot read\"" "$(fd)" \
 	"MATERIAL: cannot read net/alpha at the commit 111111111 of release os-alpha-1.0 in Org/plugins (the answer is truncated)
 rc=1"
 cfdir
-jq 'del(.tree[] | select(.path == "net/alpha"))' <<<"$(tree_json a1)" >"$STUB/trees/Org/plugins/$rel40.json"
+jq 'del(.truncated)' <<<"$(tree_json a1)" >"$STUB/trees/Org/plugins/$reltree.json"
+expect_eq "canary: a tree answer without truncated is MATERIAL \"cannot read\"" "$(fd)" \
+	"MATERIAL: cannot read net/alpha at the commit 111111111 of release os-alpha-1.0 in Org/plugins (the answer is truncated)
+rc=1"
+cfdir
+jq '.truncated = null' <<<"$(tree_json a1)" >"$STUB/trees/Org/plugins/$reltree.json"
+expect_eq "canary: a tree answer with truncated null is MATERIAL \"cannot read\"" "$(fd)" \
+	"MATERIAL: cannot read net/alpha at the commit 111111111 of release os-alpha-1.0 in Org/plugins (the answer is truncated)
+rc=1"
+cfdir
+jq 'del(.tree[] | select(.path == "net/alpha"))' <<<"$(tree_json a1)" >"$STUB/trees/Org/plugins/$reltree.json"
 expect_eq "canary: a tree without the directory is MATERIAL \"cannot read\"" "$(fd)" \
 	"MATERIAL: cannot read net/alpha at the commit 111111111 of release os-alpha-1.0 in Org/plugins (no such directory in the tree)
 rc=1"
@@ -2618,8 +2659,8 @@ for code in 404 403 429 500; do
 rc=1"
 done
 cfdir
-jq '.truncated = true' <<<"$(tree_json a1)" >"$STUB/trees/Org/plugins/main.json"
-expect_eq "canary: main's tree truncated is MATERIAL \"cannot read\"" "$(fd)" \
+jq 'del(.truncated)' <<<"$(tree_json a1)" >"$STUB/trees/Org/plugins/main.json"
+expect_eq "canary: main's tree without truncated is MATERIAL \"cannot read\"" "$(fd)" \
 	"MATERIAL: cannot read net/alpha at main in Org/plugins (the answer is truncated)
 rc=1"
 for code in 404 403 500; do
@@ -2644,7 +2685,7 @@ mkdir -p "$T/ghshim"
 cp "$T/ghdead" "$T/ghshim/gh"
 chmod 755 "$T/ghshim/gh"
 expect_eq "canary: an answer with no status line is MATERIAL \"cannot read\"" "$(PATH="$T/ghshim:$PATH" fd)" \
-	"MATERIAL: cannot read net/alpha at the commit 111111111 of release os-alpha-1.0 in Org/plugins (no HTTP status)
+	"MATERIAL: cannot read net/alpha at main in Org/plugins (no HTTP status)
 rc=1"
 # the source line's commit is read exactly: one "commit <40 hex digits>"
 for line in "Built from Org/plugins, net/alpha, in opnsense/plugins $pin." \
@@ -2652,7 +2693,8 @@ for line in "Built from Org/plugins, net/alpha, in opnsense/plugins $pin." \
 	"Built from Org/plugins, net/alpha, commit ${rel40:0:9}, in opnsense/plugins $pin." \
 	"Built from Org/plugins, net/alpha, commit ${rel40}0, in opnsense/plugins $pin." \
 	"Built from Org/plugins, net/alpha, commit ABCDEF0123456789ABCDEF0123456789ABCDEF01, in opnsense/plugins $pin." \
-	"Built from Org/plugins, net/alpha, commit $rel40 commit $rel40, in opnsense/plugins $pin."; do
+	"Built from Org/plugins, net/alpha, commit $rel40 commit $rel40, in opnsense/plugins $pin." \
+	"Built from Org/plugins, net/alpha, commit $rel40, in opnsense/plugins $pin (commit message)."; do
 	cfdir
 	printf '%s\n\nsha256: x\n' "$line" >"$T/cf/notes"
 	expect_eq "canary-findings: the source line's commit is read exactly: [$line]" "$(fd)" \
