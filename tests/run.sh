@@ -122,8 +122,8 @@ rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7' 'REQUIRE_I
 expect_fail "repo immutable: neither yes nor no" rp immutable
 printf '%s\n' 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7' >"$T/repo.conf"
 expect_fail "repo immutable: unset" rp immutable
-expect_eq "the real repo.conf says no until every package has republished" \
-	"$(sh "$root/scripts/repo.sh" immutable)" "no"
+expect_eq "the real repo.conf says yes: every package has republished since immutable releases" \
+	"$(sh "$root/scripts/repo.sh" immutable)" "yes"
 ptconf=('ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7')
 rc "${ptconf[@]}" "PKG_TOOL_COMMIT=$(printf 'a%.0s' {1..40})" "PKG_TOOL_SHA256=$(printf 'b%.0s' {1..64})"
 expect_eq "repo pkg-tool-commit" "$(rp pkg-tool-commit)" "$(printf 'a%.0s' {1..40})"
