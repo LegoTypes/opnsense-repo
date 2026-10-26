@@ -2,9 +2,14 @@
 # Build one packages.conf package in the FreeBSD VM. Leaves exactly one
 # out/<name>-<version>.pkg and out/source, one line saying where it came from.
 #   build-package.sh <package> [<commit>]
+# Every package, plugin row or ".", builds inside opnsense/plugins at the commit repo.conf
+# pins (FRAMEWORK, fetched by SHA and checked), with the package directory copied in: from
+# the plugin repository's checkout, or from this repository for the "." row. MK_FROM=upstream
+# builds in upstream master's head instead, as the canary's rebased build does.
 # With a commit (the full 40 hex digits the owner approved), exactly that commit is
 # built: it must be what the workflow was dispatched at (the "." row, GITHUB_SHA) or a
-# commit on the branch (a plugin row). Without one (the canary) the branch head is built.
+# commit on the plugin repository's branch (a plugin row). Without one (the canary) the
+# branch head is built. PLUGIN_HASH is the first nine digits of that source commit.
 # For the "." row (this repository), its source line names the last commit that
 # changed the package's directory (so a later commit elsewhere in this repository
 # is not an unreleased change of the package; needs the full history), and the
@@ -38,56 +43,66 @@ case ${MK_FROM:-} in
 *) die "MK_FROM must be empty or upstream, not $MK_FROM" ;;
 esac
 
-# make's PLUGIN_HASH for the "." row; a plugin row's gitversion prints its own checked-out commit
-hash=''
+framework=$(sh scripts/repo.sh framework)
+fwurl=https://github.com/opnsense/plugins.git
 # outside the workspace, so the plugins tree is not copied back to the runner
 work=$(mktemp -d /tmp/legotypes-build.XXXXXX)
 trap 'rm -rf "$work"' EXIT
 rm -rf out
 mkdir out
 
+# the framework every package builds in: the pinned opnsense/plugins commit, fetched by its SHA
+# (or, for the canary's rebased build, upstream master's head), with the package directory copied in
+tree=$work/tree
+if [ "${MK_FROM:-}" = upstream ]; then
+	git clone --quiet --depth 1 --branch master "$fwurl" "$tree"
+	fwline="opnsense/plugins master $(git -C "$tree" rev-parse HEAD) (MK_FROM=upstream)"
+else
+	git init --quiet "$tree"
+	git -C "$tree" fetch --quiet --depth 1 "$fwurl" "$framework"
+	fetched=$(git -C "$tree" rev-parse FETCH_HEAD)
+	[ "$fetched" = "$framework" ] || die "the framework fetch gave $fetched, not the pinned $framework"
+	git -C "$tree" checkout --quiet FETCH_HEAD
+	fwline="opnsense/plugins $framework"
+fi
+mkdir -p "$tree/$(dirname "$dir")"
+
 if [ "$repo" = . ]; then
 	[ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_SHA:-}" ] ||
 		die "GITHUB_REPOSITORY and GITHUB_SHA must name the commit of $package"
 	[ -z "$commit" ] || [ "$commit" = "$GITHUB_SHA" ] ||
 		die "the commit $commit is not the workflow run's commit $GITHUB_SHA"
-	# gitversion would print the plugins tree's commit, so name this one the way it does (nine digits)
-	[ -z "$commit" ] || hash=PLUGIN_HASH=$(printf '%.9s' "$commit")
-	# the vendor package builds against the plugins tree's Mk/
-	git clone --quiet --depth 1 --branch master https://github.com/LegoTypes/plugins.git "$work/tree"
-	mkdir -p "$work/tree/$(dirname "$dir")"
-	cp -R "$dir" "$work/tree/$dir"
+	cp -R "$dir" "$tree/$dir"
 	# the workspace synced into the VM keeps the runner's owner, so git needs it named safe
 	changed=$(git -c safe.directory="$PWD" log -1 --format=%H -- "$dir")
 	[ -n "$changed" ] || die "cannot find the last commit that changed $dir (a shallow checkout? check out with fetch-depth: 0)"
-	source="Built from $GITHUB_REPOSITORY, $dir, commit $changed (workflow run at $GITHUB_SHA), in LegoTypes/plugins master $(git -C "$work/tree" rev-parse HEAD)."
+	srccommit=$GITHUB_SHA
+	source="Built from $GITHUB_REPOSITORY, $dir, commit $changed (workflow run at $GITHUB_SHA), in"
 else
-	git clone --quiet --depth 1 --branch "$branch" "https://github.com/$repo.git" "$work/tree"
+	src=$work/src
+	git clone --quiet --depth 1 --branch "$branch" "https://github.com/$repo.git" "$src"
 	if [ -n "$commit" ]; then
-		git -C "$work/tree" fetch --quiet --depth 1 origin "$commit"
-		git -C "$work/tree" checkout --quiet "$commit"
-		[ "$(git -C "$work/tree" rev-parse HEAD)" = "$commit" ] || die "checked out $(git -C "$work/tree" rev-parse HEAD), not $commit"
+		git -C "$src" fetch --quiet --depth 1 origin "$commit"
+		git -C "$src" checkout --quiet "$commit"
+		[ "$(git -C "$src" rev-parse HEAD)" = "$commit" ] || die "checked out $(git -C "$src" rev-parse HEAD), not $commit"
 		# on the branch: the whole branch history, then the commit must be an ancestor of its tip
-		git -C "$work/tree" fetch --quiet --unshallow origin "+refs/heads/$branch:refs/remotes/origin/$branch"
-		git -C "$work/tree" merge-base --is-ancestor "$commit" "refs/remotes/origin/$branch" ||
+		git -C "$src" fetch --quiet --unshallow origin "+refs/heads/$branch:refs/remotes/origin/$branch"
+		git -C "$src" merge-base --is-ancestor "$commit" "refs/remotes/origin/$branch" ||
 			die "the commit $commit is not on branch $branch of $repo"
 	fi
-	source="Built from $repo, branch $branch, commit $(git -C "$work/tree" rev-parse HEAD)."
+	[ -d "$src/$dir" ] || die "$repo has no $dir at commit $(git -C "$src" rev-parse HEAD)"
+	cp -R "$src/$dir" "$tree/$dir"
+	srccommit=$(git -C "$src" rev-parse HEAD)
+	source="Built from $repo, $dir, commit $srccommit, in"
 fi
+source="$source $fwline."
+# the tree's HEAD is the framework's, so name the source commit the way gitversion would (nine digits)
+hash=PLUGIN_HASH=$(printf '%.9s' "$srccommit")
 
-# the canary's rebased build: the packaging rules a rebase on upstream would bring
-if [ "${MK_FROM:-}" = upstream ]; then
-	git clone --quiet --depth 1 --branch master https://github.com/opnsense/plugins.git "$work/upstream"
-	rm -rf "$work/tree/Mk"
-	cp -R "$work/upstream/Mk" "$work/tree/Mk"
-	source="$source Mk/ from opnsense/plugins master $(git -C "$work/upstream" rev-parse HEAD)."
-fi
+make -C "$tree/$dir" package PLUGIN_DEVEL= PLUGIN_ABI="$series" \
+	PLUGIN_PHP="$UPSTREAM_PHP" PLUGIN_PYTHON="$UPSTREAM_PYTHON" "$hash"
 
-# $hash is unquoted so that it vanishes when empty
-make -C "$work/tree/$dir" package PLUGIN_DEVEL= PLUGIN_ABI="$series" \
-	PLUGIN_PHP="$UPSTREAM_PHP" PLUGIN_PYTHON="$UPSTREAM_PYTHON" $hash
-
-set -- "$work/tree/$dir"/work/pkg/*.pkg
+set -- "$tree/$dir"/work/pkg/*.pkg
 [ $# -eq 1 ] && [ -f "$1" ] || die "expected one package, found: $*"
 name=$(basename "$1" .pkg)
 case $name in

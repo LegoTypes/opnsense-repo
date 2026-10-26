@@ -11,6 +11,7 @@
 #                          pkg-tool.sh builds pkg from
 #   repo.sh pkg-tool-sha256  PKG_TOOL_SHA256: the sha256 of GitHub's archive of
 #                          that commit, which pkg-tool.sh refuses to build without
+#   repo.sh framework      FRAMEWORK: the full opnsense/plugins commit every package builds in
 #   repo.sh tree [entry]   site/<entry>/latest (default: the target; the entry must
 #                          be served)
 # A malformed file fails every command.
@@ -70,6 +71,13 @@ pkg_tool_sha256() {
 	printf '%s\n' "$v"
 }
 
+framework() {
+	v=$(value FRAMEWORK)
+	printf '%s\n' "$v" | grep -Eqx '[0-9a-f]{40}' ||
+		die "$conf: FRAMEWORK must be a full commit (40 lower-case hex digits), not $v"
+	printf '%s\n' "$v"
+}
+
 serve() {
 	t=$(target)
 	list=$(value SERVE)
@@ -91,11 +99,12 @@ serve) serve ;;
 immutable) immutable ;;
 pkg-tool-commit) pkg_tool_commit ;;
 pkg-tool-sha256) pkg_tool_sha256 ;;
+framework) framework ;;
 tree)
 	e=${2:-$(target)}
 	list=$(serve)
 	printf '%s\n' "$list" | grep -qxF "$e" || die "$e is not served"
 	printf 'site/%s/latest\n' "$e"
 	;;
-*) die "usage: repo.sh abi | series | target | serve | immutable | pkg-tool-commit | pkg-tool-sha256 | tree [entry]" ;;
+*) die "usage: repo.sh abi | series | target | serve | immutable | pkg-tool-commit | pkg-tool-sha256 | framework | tree [entry]" ;;
 esac

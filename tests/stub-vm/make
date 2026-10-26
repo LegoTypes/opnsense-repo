@@ -1,9 +1,20 @@
 #!/bin/sh
 # A stand-in for "make -C <dir> package ...": writes the files named in
 # $STUB_PKGS (space-separated) into <dir>/work/pkg/. Its arguments go to the file
-# $STUB_MAKE_ARGS, one per line, when that is set.
+# $STUB_MAKE_ARGS, one per line, when that is set, and then says where it ran to
+# $STUB_MAKE_ARGS.tree: how the tree it is in was made (.fetched or .cloned), that tree's
+# Mk/plugins.mk, and whether the package directory has its Makefile.
 set -eu
 [ -z "${STUB_MAKE_ARGS:-}" ] || printf '%s\n' "$@" >"$STUB_MAKE_ARGS"
+if [ -n "${STUB_MAKE_ARGS:-}" ]; then
+	t=$2
+	while [ ! -d "$t/Mk" ] && [ "$t" != / ]; do t=$(dirname "$t"); done
+	{
+		cat "$t/.fetched" "$t/.cloned" 2>/dev/null || true
+		cat "$t/Mk/plugins.mk" 2>/dev/null || echo "no Mk"
+		if [ -f "$2/Makefile" ]; then echo "Makefile: yes"; else echo "Makefile: no"; fi
+	} >"$STUB_MAKE_ARGS.tree"
+fi
 [ "$1" = -C ] && [ "$3" = package ] || {
 	echo "stub make: unsupported: $*" >&2
 	exit 2

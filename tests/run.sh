@@ -95,8 +95,10 @@ expect_eq "real file: catalogue" "$(sh "$root/scripts/packages.sh" catalogue | t
 	"os-wg-client-tunnels os-mac-alias-cache os-wan-failover os-unbound-upstream os-legotypes "
 
 # --- repo.sh -----------------------------------------------------------------
+pin=3afd667df9bc8043d6b1a578bd63b6e4b49616d8
 rc() {
 	printf '%s\n' "$@" >"$T/repo.conf"
+	printf '%s\n' "$@" | grep -q '^FRAMEWORK=' || echo "FRAMEWORK=$pin" >>"$T/repo.conf"
 	printf '%s\n' "$@" | grep -q '^REQUIRE_IMMUTABLE_RELEASES=' || echo 'REQUIRE_IMMUTABLE_RELEASES=no' >>"$T/repo.conf"
 }
 rp() { sh "$S/repo.sh" "$@"; }
@@ -124,6 +126,18 @@ printf '%s\n' 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 expect_fail "repo immutable: unset" rp immutable
 expect_eq "the real repo.conf says yes: every package has republished since immutable releases" \
 	"$(sh "$root/scripts/repo.sh" immutable)" "yes"
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
+expect_eq "repo framework" "$(rp framework)" "$pin"
+expect_eq "repo framework: the real repo.conf pins a 40-hex commit" \
+	"$(sh "$root/scripts/repo.sh" framework | grep -Ecx '[0-9a-f]{40}')" "1"
+for bad in 3afd667df "${pin^^}" "${pin}0" "${pin:0:39}g" ''; do
+	rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7' "FRAMEWORK=$bad"
+	expect_fail "repo framework: refuses '$bad'" rp framework
+done
+printf '%s\n' 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7' >"$T/repo.conf"
+expect_fail "repo framework: refuses a missing value" rp framework
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7' "FRAMEWORK=$pin" "FRAMEWORK=$pin"
+expect_fail "repo framework: refuses a value set twice" rp framework
 ptconf=('ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7')
 rc "${ptconf[@]}" "PKG_TOOL_COMMIT=$(printf 'a%.0s' {1..40})" "PKG_TOOL_SHA256=$(printf 'b%.0s' {1..64})"
 expect_eq "repo pkg-tool-commit" "$(rp pkg-tool-commit)" "$(printf 'a%.0s' {1..40})"
@@ -931,7 +945,7 @@ vmdir() {
 	mkdir -p "$W/keys" "$W/vendor/v"
 	cp -R "$root/scripts" "$W/"
 	cp "$T/packages.conf" "$W/packages.conf"
-	printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=FreeBSD:15:amd64/26.7\n' >"$W/repo.conf"
+	printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=FreeBSD:15:amd64/26.7\nFRAMEWORK=%s\n' "$pin" >"$W/repo.conf"
 	cp "$T/pub.pem" "$W/keys/legotypes-pkg-signing.pub"
 	trust "$T/pub.pem"
 }
@@ -958,54 +972,81 @@ vmenv() {
 }
 commit=0123456789abcdef0123456789abcdef01234567
 
-conf 'os-alpha   Org/plugins br-alpha net/alpha yes' \
+conf 'os-alpha   Org/plugins main     net/alpha yes' \
 	'os-vendor  .           main     vendor/v  yes'
 vmdir
-vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha >/dev/null
+fwurl=https://github.com/opnsense/plugins.git
+# every build, plugin or "." row, is made in the framework at the pin: fetched by SHA, the package
+# directory copied in; the stub make records where it ran in $W/make.args.tree
+bp() { vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 "STUB_MAKE_ARGS=$W/make.args" STUB_GIT_DIRS=net/alpha "$@"; }
+bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha >/dev/null
 expect_eq "build: one package in out/" "$(names "$W/out")" "build os-alpha-1.1.pkg source "
-expect_eq "build: source line" "$(cat "$W/out/source")" "Built from Org/plugins, branch br-alpha, commit $commit."
+expect_eq "build: a plugin row builds in the framework at the pin" "$(cat "$W/make.args.tree")" \
+	$'https://github.com/opnsense/plugins.git '"$pin"$'\nMk from https://github.com/opnsense/plugins.git '"$pin"$'\nMakefile: yes'
+expect_eq "build: source line, plugin row" "$(cat "$W/out/source")" "Built from Org/plugins, net/alpha, commit $commit, in opnsense/plugins $pin."
+expect_eq "build: \"commit\" appears once in the plugin row's source line" "$(grep -o 'commit' "$W/out/source" | wc -l | tr -d ' ')" "1"
 expect_eq "build: the build environment" "$(cat "$W/out/build")" \
 	$'abi: FreeBSD:15:amd64\nseries: 26.7\nfreebsd: 15.1-RELEASE-p3\nphp: 85\npython: 313'
 expect_fail "build: no upstream PHP" vmenv UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha
-vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-1.1.pkg MK_FROM=upstream -- build-package.sh os-alpha >/dev/null
-expect_eq "build: with upstream Mk/" "$(cat "$W/out/source")" \
-	"Built from Org/plugins, branch br-alpha, commit $commit. Mk/ from opnsense/plugins master $commit."
-expect_fail "build: an unknown MK_FROM" vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-1.1.pkg MK_FROM=elsewhere -- build-package.sh os-alpha
-expect_fail "build: a -devel package" vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-devel-1.1.pkg -- build-package.sh os-alpha
-expect_fail "build: two packages" vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 "STUB_PKGS=os-alpha-1.1.pkg os-alpha-1.0.pkg" -- build-package.sh os-alpha
-expect_fail "build: no package" vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS= -- build-package.sh os-alpha
-expect_fail "build: not in packages.conf" vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-gamma-1.0.pkg -- build-package.sh os-gamma
-vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface -- build-package.sh os-vendor >/dev/null
-expect_eq "build: this repository's package names the last commit that changed it" "$(cat "$W/out/source")" \
-	"Built from Org/repo, vendor/v, commit abcdef0123456789abcdef0123456789abcdef01 (workflow run at feedface), in LegoTypes/plugins master $commit."
+bp STUB_PKGS=os-alpha-1.1.pkg MK_FROM=upstream -- build-package.sh os-alpha >/dev/null
+expect_eq "build: MK_FROM=upstream builds in upstream master's head and says so" "$(cat "$W/out/source")" \
+	"Built from Org/plugins, net/alpha, commit $commit, in opnsense/plugins master $commit (MK_FROM=upstream)."
+expect_eq "build: MK_FROM=upstream clones upstream master, not the pin" "$(cat "$W/make.args.tree")" \
+	$'https://github.com/opnsense/plugins.git master\nMk from https://github.com/opnsense/plugins.git\nMakefile: yes'
+expect_eq "build: \"commit\" appears once under MK_FROM=upstream" "$(grep -o 'commit' "$W/out/source" | wc -l | tr -d ' ')" "1"
+expect_fail "build: an unknown MK_FROM" bp STUB_PKGS=os-alpha-1.1.pkg MK_FROM=elsewhere -- build-package.sh os-alpha
+expect_fail "build: a -devel package" bp STUB_PKGS=os-alpha-devel-1.1.pkg -- build-package.sh os-alpha
+expect_fail "build: two packages" bp "STUB_PKGS=os-alpha-1.1.pkg os-alpha-1.0.pkg" -- build-package.sh os-alpha
+expect_fail "build: no package" bp STUB_PKGS= -- build-package.sh os-alpha
+expect_fail "build: not in packages.conf" bp STUB_PKGS=os-gamma-1.0.pkg -- build-package.sh os-gamma
+expect_fail "build: the plugin repository lacks the package directory" \
+	vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha
+bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface -- build-package.sh os-vendor >/dev/null
+expect_eq "build: source line, \".\" row" "$(cat "$W/out/source")" \
+	"Built from Org/repo, vendor/v, commit abcdef0123456789abcdef0123456789abcdef01 (workflow run at feedface), in opnsense/plugins $pin."
+expect_eq "build: \"commit\" appears once in the \".\" row's source line" "$(grep -o 'commit' "$W/out/source" | wc -l | tr -d ' ')" "1"
+expect_eq "build: the \".\" row also builds in the framework at the pin" "$(head -n 1 "$W/make.args.tree")" "$fwurl $pin"
+bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface MK_FROM=upstream -- build-package.sh os-vendor >/dev/null
+expect_eq "build: the \".\" row under MK_FROM=upstream" "$(cat "$W/out/source")" \
+	"Built from Org/repo, vendor/v, commit abcdef0123456789abcdef0123456789abcdef01 (workflow run at feedface), in opnsense/plugins master $commit (MK_FROM=upstream)."
 expect_fail "build: this repository's package from a shallow checkout" \
-	vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface STUB_GIT_SHALLOW=1 -- build-package.sh os-vendor
+	bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface STUB_GIT_SHALLOW=1 -- build-package.sh os-vendor
 expect_fail "build: this repository's package without GITHUB_SHA" \
-	vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo -- build-package.sh os-vendor
+	bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo -- build-package.sh os-vendor
 
-# the approved commit (second argument): checked out and reachable from the branch; the stub make
-# records its arguments in $W/make.args
-ok=$(printf 'a1b2c3d4e5%.0s' 1 2 3 4 | cut -c1-40)
+# a framework fetch that yields another commit than the pin is refused, in one line naming both
 other=$(printf 'f0e1d2c3b4%.0s' 1 2 3 4 | cut -c1-40)
-bp() { vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 "STUB_MAKE_ARGS=$W/make.args" "$@"; }
+fe=$(bp STUB_PKGS=os-alpha-1.1.pkg "STUB_GIT_FETCH_AS=$other" -- build-package.sh os-alpha 2>&1 >/dev/null)
+expect_eq "build: a framework fetch that yields another commit is refused, in one line naming both" \
+	"$(printf '%s\n' "$fe" | wc -l | tr -d ' ') $(printf '%s' "$fe" | grep -c "$pin.*$other\|$other.*$pin")" "1 1"
+expect_fail "build: a framework fetch that yields another commit exits non-zero" \
+	bp STUB_PKGS=os-alpha-1.1.pkg "STUB_GIT_FETCH_AS=$other" -- build-package.sh os-alpha
+
+# the approved commit (second argument): checked out and reachable from main; the stub make records
+# its arguments in $W/make.args
+ok=$(printf 'a1b2c3d4e5%.0s' 1 2 3 4 | cut -c1-40)
 bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha "$ok" >/dev/null
-expect_eq "build commit: the named commit is built" "$(cat "$W/out/source")" "Built from Org/plugins, branch br-alpha, commit $ok."
-expect_eq "build commit: a plugin row passes no PLUGIN_HASH" "$(rg -c PLUGIN_HASH "$W/make.args" || echo 0)" "0"
-expect_eq "build commit: PLUGIN_DEVEL= is still passed" "$(rg -c -w 'PLUGIN_DEVEL=' "$W/make.args")" "1"
+expect_eq "build commit: the named commit is built" "$(cat "$W/out/source")" "Built from Org/plugins, net/alpha, commit $ok, in opnsense/plugins $pin."
+expect_eq "build: PLUGIN_HASH is the source commit's nine digits, with an approved commit (plugin row)" \
+	"$(rg -c -w "PLUGIN_HASH=${ok:0:9}" "$W/make.args")" "1"
 bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha >/dev/null
-expect_eq "build commit: none given builds the branch head" "$(cat "$W/out/source")" "Built from Org/plugins, branch br-alpha, commit $commit."
-expect_fail "build commit: not on the branch" bp STUB_PKGS=os-alpha-1.1.pkg STUB_GIT_OFF_BRANCH=1 -- build-package.sh os-alpha "$ok"
+expect_eq "build: PLUGIN_HASH is the source commit's nine digits, without an approved commit (plugin row)" \
+	"$(rg -c -w "PLUGIN_HASH=${commit:0:9}" "$W/make.args")" "1"
+expect_eq "build commit: PLUGIN_DEVEL= is still passed" "$(rg -c -w 'PLUGIN_DEVEL=' "$W/make.args")" "1"
+expect_eq "build commit: none given builds the head of main" "$(cat "$W/out/source")" "Built from Org/plugins, net/alpha, commit $commit, in opnsense/plugins $pin."
+expect_fail "build: a commit not on main is refused" bp STUB_PKGS=os-alpha-1.1.pkg STUB_GIT_OFF_BRANCH=1 -- build-package.sh os-alpha "$ok"
 expect_fail "build commit: checkout lands elsewhere" bp STUB_PKGS=os-alpha-1.1.pkg "STUB_GIT_CHECKOUT_AS=$other" -- build-package.sh os-alpha "$ok"
 expect_fail "build commit: not 40 hex digits" bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha abc123
 expect_fail "build commit: upper case" bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha "$(echo "$ok" | tr a-f A-F)"
 expect_fail "build commit: a third argument" bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha "$ok" extra
-expect_fail "build commit: an empty second argument (never the branch head)" bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha ""
+expect_fail "build commit: an empty second argument (never the head of main)" bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha ""
 bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo "GITHUB_SHA=$ok" -- build-package.sh os-vendor "$ok" >/dev/null
-expect_eq "build commit: this repository's package passes the 9-digit PLUGIN_HASH" \
+expect_eq "build: PLUGIN_HASH is the source commit's nine digits, with an approved commit (\".\" row)" \
 	"$(rg -c -w "PLUGIN_HASH=${ok:0:9}" "$W/make.args")" "1"
 expect_eq "build commit: this repository's package keeps PLUGIN_DEVEL=" "$(rg -c -w 'PLUGIN_DEVEL=' "$W/make.args")" "1"
 bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo "GITHUB_SHA=$ok" -- build-package.sh os-vendor >/dev/null
-expect_eq "build commit: this repository's package without a commit passes no PLUGIN_HASH" "$(rg -c PLUGIN_HASH "$W/make.args" || echo 0)" "0"
+expect_eq "build: PLUGIN_HASH is the source commit's nine digits, without an approved commit (\".\" row)" \
+	"$(rg -c -w "PLUGIN_HASH=${ok:0:9}" "$W/make.args")" "1"
 expect_fail "build commit: this repository's package, commit is not GITHUB_SHA" \
 	bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo "GITHUB_SHA=$other" -- build-package.sh os-vendor "$ok"
 
@@ -2596,7 +2637,7 @@ expect_eq "constants: a command that fails unexpectedly" "$(PATH="$T/failshim:$P
 conf 'os-alpha  Org/plugins br net/alpha yes' \
 	'os-beta   Org/plugins br net/beta  yes'
 vmdir
-vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_FAIL_DIR=net/beta -- canary-vm.sh >/dev/null
+vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_FAIL_DIR=net/beta "STUB_GIT_DIRS=net/alpha net/beta" -- canary-vm.sh >/dev/null
 expect_eq "canary-vm: both builds of a good package" "$(names "$W/canary/os-alpha")" "fresh.pkg fresh.source rebased.pkg "
 expect_eq "canary-vm: a failing package does not stop the rest, and keeps its logs" "$(names "$W/canary/os-beta")" "fresh.log fresh.tail rebased.log rebased.tail "
 
@@ -2604,7 +2645,7 @@ cw="$T/cw"
 rm -rf "$cw"
 mkdir -p "$cw"
 cp -R "$W/canary" "$cw/"
-printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=FreeBSD:15:amd64/26.7\n' >"$T/repo.conf"
+printf 'ABI=FreeBSD:15:amd64\nSERIES=26.7\nSERVE=FreeBSD:15:amd64/26.7\nFRAMEWORK=%s\n' "$pin" >"$T/repo.conf"
 printf 'NEWEST=26.7\nNEXT_ABI=\nSERIES=26.7\nCORE=26.7.5\nPHP=85\nPYTHON=313\nFREEBSD=15.1\n' >"$cw/upstream.env"
 reset_stub
 canary_run() { (cd "$cw" && bash "$S/canary.sh" https://run/2); }
@@ -2836,7 +2877,7 @@ expect_fail "out-dir: usage" bash "$root/scripts/out-dir.sh" os-alpha
 # what build-package.sh writes passes, for a plugin row and for this repository's row
 conf 'os-alpha   Org/plugins br-alpha net/alpha yes' 'os-vendor  .           main     vendor/v  yes'
 vmdir
-vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha "$ok" >/dev/null
+vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_GIT_DIRS=net/alpha STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha "$ok" >/dev/null
 expect_eq "out-dir: build-package.sh's output for a plugin" "$(bash "$root/scripts/out-dir.sh" os-alpha "$W/out")" "$W/out/os-alpha-1.1.pkg"
 vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo "GITHUB_SHA=$ok" -- build-package.sh os-vendor "$ok" >/dev/null
 expect_eq "out-dir: build-package.sh's output for this repository's package" \
