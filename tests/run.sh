@@ -2869,7 +2869,7 @@ odset() {
 	rm -rf "$od"
 	mkdir -p "$od"
 	echo pkg >"$od/${1:-os-alpha}-1.0_1.pkg"
-	printf 'Built from Org/plugins, branch br-alpha, commit %s.\n' "$commit" >"$od/source"
+	printf 'Built from Org/plugins, net/alpha, commit %s, in opnsense/plugins %s.\n' "$commit" "$pin" >"$od/source"
 	printf 'abi: FreeBSD:15:amd64\nseries: 26.7\nfreebsd: 15.1-RELEASE-p3\nphp: 85\npython: 313\n' >"$od/build"
 }
 odr() { bash "$root/scripts/out-dir.sh" "${1:-os-alpha}" "$od"; }
@@ -2958,13 +2958,6 @@ rm -rf "$T/ghw" "$T/gh"
 mapfile -t c < <(ghrepo Org/plugins br-alpha net/alpha/Makefile one two)
 c_one=${c[0]}
 c_three=$(ghrepo Org/plugins other net/alpha/Makefile three)
-# LegoTypes/plugins: master holds m-one and m-two, branch side (from m-two) m-three
-mapfile -t c < <(ghrepo LegoTypes/plugins master Mk/plugins.mk m-one m-two)
-m_one=${c[0]}
-m_side=$(ghrepo LegoTypes/plugins side Mk/plugins.mk m-three)
-# served with master as its default branch (a bare clone keeps every branch)
-gitq -C "$T/ghw/LegoTypes/plugins" checkout -q master
-rm -rf "$T/gh/LegoTypes/plugins.git" && gitq clone -q --bare "$T/ghw/LegoTypes/plugins" "$T/gh/LegoTypes/plugins.git"
 # freshrepo: $T/fresh, a checkout of this repository whose vendor/v last changed in $v_changed,
 # at a later commit $v_head
 freshrepo() {
@@ -3065,12 +3058,14 @@ pvwith() {
 	local "$1"
 	pv "${@:2}"
 }
-# a plugin: the VM's source line is never read
-odset && printf 'Built from somewhere else entirely.\n' >"$od/source"
+# a plugin: both lines are composed from packages.conf, the approved commit and repo.conf's pin; the VM's
+# line is read only to check that it is that line, and nothing is ever taken from it
+palpha=$(printf 'Built from Org/plugins, net/alpha, commit %s, in opnsense/plugins %s.' "$c_one" "$pin")
+odset && printf '%s\n' "$palpha" >"$od/source"
 rm -rf "$T/rev"
 pv "$T" os-alpha "$c_one" >/dev/null 2>&1 || bad "provenance: a plugin exited non-zero"
 expect_eq "provenance: a plugin's source line from packages.conf and the commit" "$(cat "$T/rev/source")" \
-	"Built from Org/plugins, branch br-alpha, commit $c_one."
+	"$palpha"
 expect_eq "provenance: ABI and series from repo.conf, PHP and Python from upstream.sh, FreeBSD as the VM reported it" \
 	"$(cat "$T/rev/build")" $'abi: FreeBSD:15:amd64\nseries: 26.7\nfreebsd: 15.1-RELEASE-p3 (reported by the build VM)\nphp: 85\npython: 313'
 expect_eq "provenance: review/ holds the two files" "$(names "$T/rev")" "build source "
@@ -3095,23 +3090,49 @@ odset && sed -i.bak 's/^abi: .*/abi: FreeBSD:16:amd64/' "$od/build" && rm "$od/b
 rm -rf "$T/rev"
 err=$(pv "$T" os-alpha "$c_one" 2>&1 >/dev/null)
 expect_eq "provenance: a refusal is one line of its own" "$(wc -l <<<"$err" | tr -d ' ') ${err:0:14}" "1 provenance.sh:"
-# this repository's package: the last change to its directory from this checkout, the plugins
-# master commit the VM reported only once it is a commit of LegoTypes/plugins master
+# the VM's line must be the composed one: another framework (40 hex digits or short), the old
+# LegoTypes/plugins master shape, a branch, MK_FROM=upstream's line, another commit or directory
+other40=$(printf 'e%.0s' {1..40})
+for bad_line in "${palpha/$pin/$other40}" "${palpha/$pin/${pin:0:9}}" "${palpha/$pin/}" \
+	"Built from Org/plugins, net/alpha, commit $c_one, in LegoTypes/plugins master $pin." \
+	"Built from Org/plugins, branch br-alpha, commit $c_one." \
+	"Built from Org/plugins, net/alpha, commit $c_one, in opnsense/plugins master $pin (MK_FROM=upstream)." \
+	"${palpha/$c_one/$c_three}" "${palpha/net\/alpha/net\/beta}" "${palpha/Org\/plugins/Other\/plugins}" \
+	"$palpha " "Built from somewhere else entirely."; do
+	odset && printf '%s\n' "$bad_line" >"$od/source"
+	rm -rf "$T/rev"
+	expect_fail "provenance: a plugin refuses the VM's line [${bad_line:0:70}]" pv "$T" os-alpha "$c_one"
+done
+odset && printf '%s\n' "${palpha/$pin/$other40}" >"$od/source"
+rm -rf "$T/rev"
+err=$(pv "$T" os-alpha "$c_one" 2>&1 >/dev/null)
+expect_eq "provenance: a plugin's other-framework refusal is one line, quoting the VM's line" \
+	"$(wc -l <<<"$err" | tr -d ' ') ${err:0:14} $(grep -c "$other40" <<<"$err")" "1 provenance.sh: 1"
+expect_eq "provenance: a refused plugin leaves no review/" "$(exists "$T/rev")" no
+# this repository's package: the last change to its directory from this checkout, the framework at the pin
 freshrepo
-vsrcline() { printf 'Built from Org/repo, vendor/v, commit %s (workflow run at %s), in LegoTypes/plugins master %s.\n' "$@"; }
-odset os-vendor && vsrcline "$ok" "$v_head" "$m_one" >"$od/source"
+vline() { printf 'Built from Org/repo, vendor/v, commit %s (workflow run at %s), in opnsense/plugins %s.' "$@"; }
+vgood=$(vline "$v_changed" "$v_head" "$pin")
+odset os-vendor && printf '%s\n' "$vgood" >"$od/source"
 rm -rf "$T/rev"
 pv "$T/fresh" os-vendor "$v_head" >/dev/null 2>&1 || bad "provenance: this repository's package exited non-zero"
-expect_eq "provenance: this repository's source line: this checkout's last change, the plugins master commit" \
-	"$(cat "$T/rev/source" 2>/dev/null)" "Built from Org/repo, vendor/v, commit $v_changed (workflow run at $v_head), in LegoTypes/plugins master $m_one."
-for bad_line in "$(vsrcline "$ok" "$v_head" "$m_side")" "$(vsrcline "$ok" "$v_head" "${m_one:0:9}")" \
-	"$(vsrcline "$ok" "$v_head" "$(printf 'e%.0s' {1..40})")" "$(vsrcline "$ok" "$v_changed" "$m_one")" \
-	"Built from Org/repo, vendor/v, in LegoTypes/plugins master $m_one."; do
+expect_eq "provenance: this repository's source line: this checkout's last change, the commit, the pin" \
+	"$(cat "$T/rev/source" 2>/dev/null)" "$vgood"
+for bad_line in "$(vline "$v_changed" "$v_head" "$other40")" "$(vline "$v_changed" "$v_head" "${pin:0:9}")" \
+	"$(vline "$v_changed" "$v_head" "")" "$(vline "$v_head" "$v_head" "$pin")" "$(vline "$v_changed" "$v_changed" "$pin")" \
+	"Built from Org/repo, vendor/v, commit $v_changed (workflow run at $v_head), in LegoTypes/plugins master $pin." \
+	"Built from Org/repo, vendor/v, commit $v_changed (workflow run at $v_head), in opnsense/plugins master $pin (MK_FROM=upstream)." \
+	"Built from Other/repo, vendor/v, commit $v_changed (workflow run at $v_head), in opnsense/plugins $pin." \
+	"Built from Org/repo, vendor/w, commit $v_changed (workflow run at $v_head), in opnsense/plugins $pin." \
+	"Built from Org/repo, vendor/v, in opnsense/plugins $pin." "$vgood "; do
 	odset os-vendor && printf '%s\n' "$bad_line" >"$od/source"
 	rm -rf "$T/rev"
-	expect_fail "provenance: refuses the VM's line [${bad_line:0:60}...${bad_line: -50}]" pv "$T/fresh" os-vendor "$v_head"
+	expect_fail "provenance: this repository's package refuses the VM's line [${bad_line:0:60}...${bad_line: -50}]" pv "$T/fresh" os-vendor "$v_head"
 done
-odset os-vendor && vsrcline "$ok" "$v_changed" "$m_one" >"$od/source"
+odset os-vendor && printf '%s\n' "$(vline "$v_changed" "$v_head" "$other40")" >"$od/source"
+err=$(pv "$T/fresh" os-vendor "$v_head" 2>&1 >/dev/null)
+expect_eq "provenance: this repository's other-framework refusal is one line" "$(wc -l <<<"$err" | tr -d ' ') ${err:0:14}" "1 provenance.sh:"
+odset os-vendor && printf '%s\n' "$vgood" >"$od/source"
 rm -rf "$T/rev"
 expect_fail "provenance: this checkout is not at the commit" pv "$T/fresh" os-vendor "$v_changed"
 

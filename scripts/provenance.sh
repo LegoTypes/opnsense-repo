@@ -2,16 +2,17 @@
 # Copyright (C) 2026 cayossarian
 # provenance.sh <package> <out dir> <review dir>
 # In the review job: write <review dir>/source and <review dir>/build, the lines the release
-# notes carry, from trusted inputs instead of the build VM's out/source and out/build, which
-# are read only as far as said here (out-dir.sh checks their shape first).
-#   source  a plugin: "Built from <repository>, branch <branch>, commit <COMMIT>." from
-#           packages.conf and the approved commit. This repository's package:
-#           "Built from <GITHUB_REPOSITORY>, <dir>, commit <last change> (workflow run at
-#           <COMMIT>), in LegoTypes/plugins master <commit>.", the last commit that changed
-#           <dir> from this checkout (which must be at COMMIT, with its full history), and the
-#           LegoTypes/plugins master commit the VM reported, taken only from a line of exactly
-#           build-package.sh's shape and only once it is a commit of LegoTypes/plugins master
-#           (an ancestor of its tip, in a commits-only clone).
+# notes carry, from trusted inputs instead of the build VM's out/source and out/build. Both
+# source lines are composed here, from packages.conf, the approved commit, repo.conf's
+# framework pin (repo.sh framework) and, for this repository's package, the checkout; the
+# VM's out/source (out-dir.sh checks its shape first) is read only to check that it is
+# exactly that line, and no value is taken from it. Any difference refuses.
+#   source  a plugin: "Built from <repository>, <dir>, commit <COMMIT>, in opnsense/plugins <pin>."
+#           This repository's package: "Built from <GITHUB_REPOSITORY>, <dir>, commit <last
+#           change> (workflow run at <COMMIT>), in opnsense/plugins <pin>.", the last commit
+#           that changed <dir> from this checkout (which must be at COMMIT, with its full history).
+#           A build made under MK_FROM=upstream says "master <sha> (MK_FROM=upstream)" and is
+#           therefore refused.
 #   build   abi and series from repo.conf, php and python from UPSTREAM_PHP and UPSTREAM_PYTHON
 #           (upstream.sh, run again in the review job); the VM's must be the same. freebsd is
 #           the VM's, marked "(reported by the build VM)".
@@ -36,7 +37,7 @@ pkg=$1 out=$2 rev=$3
 [[ ! -e $rev ]] || die "$rev exists"
 bash "$here/out-dir.sh" "$pkg" "$out" >/dev/null
 row=$(sh "$here/packages.sh" row "$pkg")
-read -r repo branch dir _ <<<"$row"
+read -r repo _ dir _ <<<"$row"
 
 # the VM's build lines (out-dir.sh: exactly abi, series, freebsd, php, python)
 declare -A vm=()
@@ -49,6 +50,8 @@ want_series=$(sh "$here/repo.sh" series)
 [[ ${vm[python]} == "$UPSTREAM_PYTHON" ]] ||
 	die "the build VM built with Python $(q "${vm[python]}"); upstream.sh now says $UPSTREAM_PYTHON"
 
+pin=$(sh "$here/repo.sh" framework)
+[[ $pin =~ ^[0-9a-f]{40}$ ]] || die "repo.conf's FRAMEWORK is not a full 40-digit commit"
 if [[ $repo == . ]]; then
 	[[ ${GITHUB_REPOSITORY:-} =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "GITHUB_REPOSITORY must name this repository"
 	head=$(git rev-parse HEAD) || die "this is not a checkout"
@@ -56,23 +59,13 @@ if [[ $repo == . ]]; then
 	changed=$(git log -1 --format=%H -- "$dir")
 	[[ $changed =~ ^[0-9a-f]{40}$ ]] ||
 		die "cannot find the last commit that changed $dir (a shallow checkout? check out with fetch-depth: 0)"
-	line=$(<"$out/source")
-	shape="^Built from [^ ,]+, [^ ,]+, commit [0-9a-f]{40} \\(workflow run at $COMMIT\\), in LegoTypes/plugins master ([0-9a-f]{40})\\.$"
-	[[ $line =~ $shape ]] || die "the build VM's source line is not the one build-package.sh writes for $COMMIT"
-	master=${BASH_REMATCH[1]}
-	work=$(mktemp -d)
-	trap 'rm -rf "$work"' EXIT
-	git clone --quiet --filter=tree:0 --no-checkout --single-branch --branch master \
-		https://github.com/LegoTypes/plugins.git "$work/plugins" 2>/dev/null ||
-		die "cannot clone LegoTypes/plugins master"
-	if ! git -C "$work/plugins" cat-file -e "$master^{commit}" 2>/dev/null ||
-		! git -C "$work/plugins" merge-base --is-ancestor "$master" refs/remotes/origin/master; then
-		die "the build VM's LegoTypes/plugins commit $master is not on LegoTypes/plugins master"
-	fi
-	source="Built from $GITHUB_REPOSITORY, $dir, commit $changed (workflow run at $COMMIT), in LegoTypes/plugins master $master."
+	source="Built from $GITHUB_REPOSITORY, $dir, commit $changed (workflow run at $COMMIT), in opnsense/plugins $pin."
 else
-	source="Built from $repo, branch $branch, commit $COMMIT."
+	source="Built from $repo, $dir, commit $COMMIT, in opnsense/plugins $pin."
 fi
+vm_source=$(<"$out/source")
+[[ $vm_source == "$source" ]] ||
+	die "the build VM's source line $(q "$vm_source") is not $(q "$source")"
 
 mkdir -p "$rev"
 printf '%s\n' "$source" >"$rev/source"
