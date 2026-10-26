@@ -2826,6 +2826,10 @@ rm "$raw_pin/Templates/models"
 expect_eq "constants: a file too large or that cannot be read" "$(ccs)" \
 	$'MATERIAL: cannot read Templates/models of '"$pinlabel"$': it was not compared\nMATERIAL: opnsense/plugins master\'s Keywords/sample.ucl is over 64 KiB: it was not compared\nrc=1'
 reset_stub
+touch "$raw_pin/Templates/models.nohdrend"
+expect_eq "constants: a raw answer whose headers never end is MATERIAL \"cannot read\"" "$(ccs)" \
+	$'MATERIAL: cannot read Templates/models of '"$pinlabel"$': it was not compared\nrc=1'
+reset_stub
 jq -c '. + [{name: "pkgdeps.ucl", type: "file"}]' <<<"$up_keywords" >"$STUB/contents/opnsense/plugins/$pin/Keywords"
 expect_eq "constants: a file the pin adds" "$(ccs)" \
 	$'MATERIAL: '"$pinlabel"$'\'s Keywords/ holds pkgdeps.ucl, which verify-payload.sh has no copy of\nrc=1'

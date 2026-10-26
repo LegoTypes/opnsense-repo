@@ -9,7 +9,7 @@
 #   contents/<owner>/<repository>/<ref>/<directory>
 #                        gh api repos/<owner>/<repository>/contents/<directory>?ref=<ref>, any sha or branch
 #                        (absent: HTTP 404)
-#   raw/<owner>/<repository>/<ref>/<path>
+#   raw/<owner>/<repository>/<ref>/<path>   (<path>.nohdrend present: with -i, no empty line ends the headers)
 #                        the same with -H 'Accept: application/vnd.github.raw': the file's content, or with
 #                        <path>.stream present, 50 MB, and "whole" or "cut" appended to stream
 #   trees/<owner>/<repository>/<sha>.json
@@ -124,7 +124,7 @@ case "$1 $2" in
 		elif [[ -f $f ]]; then
 			body=$(<"$f")
 		else
-			code=404
+			code=${2:-404}
 			body='{"message":"Not Found"}'
 		fi
 		if [[ $inc == yes ]]; then
@@ -169,7 +169,10 @@ case "$1 $2" in
 			code=200
 			[[ ! -f $f.status ]] || code=$(<"$f.status")
 			[[ -f $f || -f $f.status ]] || code=404
-			if [[ $inc == yes ]]; then printf 'HTTP/2.0 %s Stub\r\ncontent-type: text/plain\r\n\r\n' "$code"; fi
+			if [[ $inc == yes ]]; then
+				# <file>.nohdrend: the headers never end, the content follows them with no empty line
+				if [[ -f $f.nohdrend ]]; then printf 'HTTP/2.0 %s Stub\r\ncontent-type: text/plain\r\n' "$code"; else printf 'HTTP/2.0 %s Stub\r\ncontent-type: text/plain\r\n\r\n' "$code"; fi
+			fi
 			if ((code >= 400)); then
 				[[ $inc == yes ]] || echo "HTTP $code" >&2
 				exit 1
@@ -186,8 +189,9 @@ case "$1 $2" in
 		path=${path%'?recursive=1'}
 		f="$STUB/trees/${path%%/git/trees/*}/${path#*/git/trees/}.json"
 		# GitHub answers 422, not 404, for a sha it does not hold when the tree is read recursively
-		if [[ ! -f $f && ! -f $f.status && $f != */main.json ]]; then echo 422 >"$f.status"; fi
-		answer "$f"
+		absent=422
+		[[ $f != */main.json ]] || absent=404
+		answer "$f" "$absent"
 		;;
 	*/git/commits/*)
 		answer "$STUB/gitcommits/${path%%/git/commits/*}/${path#*/git/commits/}.json"
