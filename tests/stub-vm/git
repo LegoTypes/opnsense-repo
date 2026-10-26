@@ -21,7 +21,7 @@
 #                                                                  succeeds only for the checked-out commit and that
 #                                                                  ref; fails when STUB_GIT_OFF_BRANCH is set
 #   git -c safe.directory=<cwd> log -1 --format=%H -- <dir>        prints another fixed commit, the last change to <dir>
-#                                                                  (nothing when STUB_GIT_SHALLOW is set)
+#   git -c safe.directory=<cwd> rev-parse --is-shallow-repository  prints false (true when STUB_GIT_SHALLOW is set)
 # Every -C call is appended to $STUB_GIT_LOG when that is set. Anything else, including any other fetch or
 # merge-base form, is unsupported (exit 2). A tree is a directory, not a repository: the stub keeps no history.
 set -eu
@@ -141,7 +141,14 @@ log)
 		echo "fatal: detected dubious ownership in repository at '$PWD'" >&2
 		exit 128
 	}
-	[ -n "${STUB_GIT_SHALLOW:-}" ] || echo abcdef0123456789abcdef0123456789abcdef01
+	echo abcdef0123456789abcdef0123456789abcdef01
+	;;
+rev-parse)
+	[ $# -eq 2 ] && [ "$2" = --is-shallow-repository ] && [ "${safe:-}" = "$PWD" ] || {
+		echo "stub git: unsupported: $*" >&2
+		exit 2
+	}
+	if [ -n "${STUB_GIT_SHALLOW:-}" ]; then echo true; else echo false; fi
 	;;
 *)
 	echo "stub git: unsupported: $*" >&2

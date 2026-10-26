@@ -1044,8 +1044,9 @@ expect_eq "build: the \".\" row also builds in the framework at the pin" "$(head
 bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface MK_FROM=upstream -- build-package.sh os-vendor >/dev/null
 expect_eq "build: the \".\" row under MK_FROM=upstream" "$(cat "$W/out/source")" \
 	"Built from Org/repo, vendor/v, commit abcdef0123456789abcdef0123456789abcdef01 (workflow run at feedface), in opnsense/plugins master $fwhead (MK_FROM=upstream)."
-expect_fail "build: this repository's package from a shallow checkout" \
-	bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface STUB_GIT_SHALLOW=1 -- build-package.sh os-vendor
+err=$(bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface STUB_GIT_SHALLOW=1 -- build-package.sh os-vendor 2>&1 >/dev/null)
+expect_eq "build: this repository's package from a shallow checkout is refused, one line" \
+	"$(printf '%s\n' "$err" | wc -l | tr -d ' ') $(printf '%s' "$err" | grep -c 'shallow checkout')" "1 1"
 expect_fail "build: this repository's package without GITHUB_SHA" \
 	bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo -- build-package.sh os-vendor
 
@@ -3134,7 +3135,39 @@ err=$(pv "$T/fresh" os-vendor "$v_head" 2>&1 >/dev/null)
 expect_eq "provenance: this repository's other-framework refusal is one line" "$(wc -l <<<"$err" | tr -d ' ') ${err:0:14}" "1 provenance.sh:"
 odset os-vendor && printf '%s\n' "$vgood" >"$od/source"
 rm -rf "$T/rev"
-expect_fail "provenance: this checkout is not at the commit" pv "$T/fresh" os-vendor "$v_changed"
+err=$(pv "$T/fresh" os-vendor "$v_changed" 2>&1 >/dev/null)
+expect_eq "provenance: this checkout is not at the commit: that guard's own message" \
+	"$(wc -l <<<"$err" | tr -d ' ') $(grep -c "this checkout is at $v_head, not the approved $v_changed" <<<"$err")" "1 1"
+# a real shallow clone: its last change to vendor/v would be its one commit, not the true one
+rm -rf "$T/shallow"
+gitq clone -q --depth 1 "file://$T/fresh" "$T/shallow"
+odset os-vendor && printf '%s\n' "$vgood" >"$od/source"
+rm -rf "$T/rev"
+err=$(pv "$T/shallow" os-vendor "$v_head" 2>&1 >/dev/null)
+expect_eq "provenance: a --depth 1 clone is refused, one line" \
+	"$(wc -l <<<"$err" | tr -d ' ') $(grep -c 'shallow checkout' <<<"$err")" "1 1"
+expect_eq "provenance: a refused shallow clone leaves no review/" "$(exists "$T/rev")" no
+# the VM's line is compared byte for byte: no trailing newline, a NUL
+odset os-vendor && printf '%s' "$vgood" >"$od/source"
+rm -rf "$T/rev"
+expect_fail "provenance: the VM's line without its newline" pv "$T/fresh" os-vendor "$v_head"
+odset os-vendor && printf '%s\0\n' "$vgood" >"$od/source"
+rm -rf "$T/rev"
+expect_fail "provenance: the VM's line with a NUL" pv "$T/fresh" os-vendor "$v_head"
+odset && printf '%s' "$palpha" >"$od/source"
+rm -rf "$T/rev"
+expect_fail "provenance: a plugin's VM line without its newline" pv "$T" os-alpha "$c_one"
+odset && printf '%s\0\n' "$palpha" >"$od/source"
+rm -rf "$T/rev"
+expect_fail "provenance: a plugin's VM line with a NUL" pv "$T" os-alpha "$c_one"
+# a malformed FRAMEWORK is repo.sh's refusal, end to end
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7' 'FRAMEWORK=abc123'
+odset && printf '%s\n' "$palpha" >"$od/source"
+rm -rf "$T/rev"
+err=$(pv "$T" os-alpha "$c_one" 2>&1 >/dev/null)
+expect_eq "provenance: a malformed FRAMEWORK is repo.sh's refusal, one line" \
+	"$(wc -l <<<"$err" | tr -d ' ') ${err:0:8}" "1 repo.sh:"
+rc 'ABI=FreeBSD:15:amd64' 'SERIES=26.7' 'SERVE=FreeBSD:15:amd64/26.7'
 
 # --- payload.sh: verify-payload.sh on a build ---------------------------------------------
 vreset
@@ -3166,7 +3199,7 @@ rsset() {
 	unset RS_MANIFEST
 	odset
 	rm -rf "$rv_" && mkdir -p "$rv_"
-	printf 'Built from Org/plugins, branch br-alpha, commit %s.\n' "$commit" >"$rv_/source"
+	printf 'Built from Org/plugins, net/alpha, commit %s, in opnsense/plugins %s.\n' "$commit" "$pin" >"$rv_/source"
 	printf 'abi: FreeBSD:15:amd64\nseries: 26.7\nfreebsd: 15.1-RELEASE-p3 (reported by the build VM)\nphp: 85\npython: 313\n' >"$rv_/build"
 	printf 'built os-alpha-1.0_1.pkg %s\ncarry FreeBSD:15:amd64/26.7 os-beta-1.0 %s immutable=no\ncommit %s\n' \
 		"$(sum "$od/os-alpha-1.0_1.pkg")" "$(printf 'b%.0s' {1..64})" "$commit" >"$rv_/manifest"

@@ -50,12 +50,13 @@ want_series=$(sh "$here/repo.sh" series)
 [[ ${vm[python]} == "$UPSTREAM_PYTHON" ]] ||
 	die "the build VM built with Python $(q "${vm[python]}"); upstream.sh now says $UPSTREAM_PYTHON"
 
-pin=$(sh "$here/repo.sh" framework)
-[[ $pin =~ ^[0-9a-f]{40}$ ]] || die "repo.conf's FRAMEWORK is not a full 40-digit commit"
+pin=$(sh "$here/repo.sh" framework) # repo.sh refuses anything but a full 40-digit commit
 if [[ $repo == . ]]; then
 	[[ ${GITHUB_REPOSITORY:-} =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "GITHUB_REPOSITORY must name this repository"
 	head=$(git rev-parse HEAD) || die "this is not a checkout"
 	[[ $head == "$COMMIT" ]] || die "this checkout is at $head, not the approved $COMMIT"
+	[[ $(git rev-parse --is-shallow-repository) == false ]] ||
+		die "this is a shallow checkout: check out with fetch-depth: 0"
 	changed=$(git log -1 --format=%H -- "$dir")
 	[[ $changed =~ ^[0-9a-f]{40}$ ]] ||
 		die "cannot find the last commit that changed $dir (a shallow checkout? check out with fetch-depth: 0)"
@@ -63,9 +64,9 @@ if [[ $repo == . ]]; then
 else
 	source="Built from $repo, $dir, commit $COMMIT, in opnsense/plugins $pin."
 fi
-vm_source=$(<"$out/source")
-[[ $vm_source == "$source" ]] ||
-	die "the build VM's source line $(q "$vm_source") is not $(q "$source")"
+# byte for byte: the line and its newline, nothing else (no NUL, no missing newline)
+printf '%s\n' "$source" | cmp -s - "$out/source" ||
+	die "the build VM's source line $(q "$(<"$out/source")") is not $(q "$source")"
 
 mkdir -p "$rev"
 printf '%s\n' "$source" >"$rev/source"

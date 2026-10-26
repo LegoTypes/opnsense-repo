@@ -81,6 +81,8 @@ if [ "$repo" = . ]; then
 	[ -z "$links" ] || die "$dir holds a symbolic link"
 	cp -R "$dir" "$tree/$dir"
 	# the workspace synced into the VM keeps the runner's owner, so git needs it named safe
+	[ "$(git -c safe.directory="$PWD" rev-parse --is-shallow-repository)" = false ] ||
+		die "this is a shallow checkout: check out with fetch-depth: 0"
 	changed=$(git -c safe.directory="$PWD" log -1 --format=%H -- "$dir")
 	[ -n "$changed" ] || die "cannot find the last commit that changed $dir (a shallow checkout? check out with fetch-depth: 0)"
 	srccommit=$GITHUB_SHA
