@@ -91,6 +91,12 @@ expect_fail "duplicate" pk catalogue
 conf 'os-alpha-2 Org/plugins br net/a yes'
 expect_fail "name with -digit" pk row os-alpha-2
 expect_fail "usage" pk
+for bad in . .. net/.. ../alpha /net/alpha net/alpha/ net net/a/b Net/alpha net/al.pha; do
+	conf "os-alpha Org/plugins br $bad yes"
+	expect_fail "directory '$bad' is refused" pk row os-alpha
+done
+conf 'os-alpha Org/plugins br net/al-pha2 yes'
+expect_eq "directory <category>/<name> is accepted" "$(pk row os-alpha)" "Org/plugins br net/al-pha2 yes"
 expect_eq "real file: catalogue" "$(sh "$root/scripts/packages.sh" catalogue | tr '\n' ' ')" \
 	"os-wg-client-tunnels os-mac-alias-cache os-wan-failover os-unbound-upstream os-legotypes "
 
@@ -976,6 +982,7 @@ conf 'os-alpha   Org/plugins main     net/alpha yes' \
 	'os-vendor  .           main     vendor/v  yes'
 vmdir
 fwurl=https://github.com/opnsense/plugins.git
+fwhead=fedcba9876543210fedcba9876543210fedcba98
 # every build, plugin or "." row, is made in the framework at the pin: fetched by SHA, the package
 # directory copied in; the stub make records where it ran in $W/make.args.tree
 bp() { vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 "STUB_MAKE_ARGS=$W/make.args" STUB_GIT_DIRS=net/alpha "$@"; }
@@ -990,7 +997,7 @@ expect_eq "build: the build environment" "$(cat "$W/out/build")" \
 expect_fail "build: no upstream PHP" vmenv UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha
 bp STUB_PKGS=os-alpha-1.1.pkg MK_FROM=upstream -- build-package.sh os-alpha >/dev/null
 expect_eq "build: MK_FROM=upstream builds in upstream master's head and says so" "$(cat "$W/out/source")" \
-	"Built from Org/plugins, net/alpha, commit $commit, in opnsense/plugins master $commit (MK_FROM=upstream)."
+	"Built from Org/plugins, net/alpha, commit $commit, in opnsense/plugins master $fwhead (MK_FROM=upstream)."
 expect_eq "build: MK_FROM=upstream clones upstream master, not the pin" "$(cat "$W/make.args.tree")" \
 	$'https://github.com/opnsense/plugins.git master\nMk from https://github.com/opnsense/plugins.git\nMakefile: yes'
 expect_eq "build: \"commit\" appears once under MK_FROM=upstream" "$(grep -o 'commit' "$W/out/source" | wc -l | tr -d ' ')" "1"
@@ -999,8 +1006,29 @@ expect_fail "build: a -devel package" bp STUB_PKGS=os-alpha-devel-1.1.pkg -- bui
 expect_fail "build: two packages" bp "STUB_PKGS=os-alpha-1.1.pkg os-alpha-1.0.pkg" -- build-package.sh os-alpha
 expect_fail "build: no package" bp STUB_PKGS= -- build-package.sh os-alpha
 expect_fail "build: not in packages.conf" bp STUB_PKGS=os-gamma-1.0.pkg -- build-package.sh os-gamma
-expect_fail "build: the plugin repository lacks the package directory" \
-	vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha
+err=$(vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha 2>&1 >/dev/null)
+expect_eq "build: the plugin repository lacks the package directory: the build's own refusal, one line" \
+	"$(printf '%s\n' "$err" | wc -l | tr -d ' ') $(printf '%s' "$err" | grep -c "has no net/alpha at commit $commit")" "1 1"
+# a framework that already holds the package directory is refused, not nested into
+for mk in '' upstream; do
+	err=$(bp STUB_PKGS=os-alpha-1.1.pkg STUB_GIT_FW_DIRS=net/alpha MK_FROM=$mk -- build-package.sh os-alpha 2>&1 >/dev/null)
+	expect_eq "build: a framework that already has the package directory is refused (MK_FROM=$mk), one line" \
+		"$(printf '%s\n' "$err" | wc -l | tr -d ' ') $(printf '%s' "$err" | grep -c "already has net/alpha")" "1 1"
+done
+err=$(bp STUB_PKGS=os-vendor-1.0_2.pkg STUB_GIT_FW_DIRS=vendor/v GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface -- build-package.sh os-vendor 2>&1 >/dev/null)
+expect_eq "build: a framework that already has the \".\" row's directory is refused" \
+	"$(printf '%s\n' "$err" | wc -l | tr -d ' ') $(printf '%s' "$err" | grep -c "already has vendor/v")" "1 1"
+# a package directory that is, or holds, a symbolic link is refused (no plugin ships one)
+for l in net/alpha net/alpha/link; do
+	err=$(bp STUB_PKGS=os-alpha-1.1.pkg STUB_GIT_DIRS= STUB_GIT_LINK=$l -- build-package.sh os-alpha 2>&1 >/dev/null)
+	expect_eq "build: a plugin directory holding a symbolic link ($l) is refused, one line" \
+		"$(printf '%s\n' "$err" | wc -l | tr -d ' ') $(printf '%s' "$err" | grep -c "symbolic link")" "1 1"
+done
+mkdir -p "$W/vendor/v" && ln -s /etc "$W/vendor/v/link"
+err=$(bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface -- build-package.sh os-vendor 2>&1 >/dev/null)
+expect_eq "build: this repository's directory holding a symbolic link is refused, one line" \
+	"$(printf '%s\n' "$err" | wc -l | tr -d ' ') $(printf '%s' "$err" | grep -c "symbolic link")" "1 1"
+rm "$W/vendor/v/link"
 bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface -- build-package.sh os-vendor >/dev/null
 expect_eq "build: source line, \".\" row" "$(cat "$W/out/source")" \
 	"Built from Org/repo, vendor/v, commit abcdef0123456789abcdef0123456789abcdef01 (workflow run at feedface), in opnsense/plugins $pin."
@@ -1008,7 +1036,7 @@ expect_eq "build: \"commit\" appears once in the \".\" row's source line" "$(gre
 expect_eq "build: the \".\" row also builds in the framework at the pin" "$(head -n 1 "$W/make.args.tree")" "$fwurl $pin"
 bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface MK_FROM=upstream -- build-package.sh os-vendor >/dev/null
 expect_eq "build: the \".\" row under MK_FROM=upstream" "$(cat "$W/out/source")" \
-	"Built from Org/repo, vendor/v, commit abcdef0123456789abcdef0123456789abcdef01 (workflow run at feedface), in opnsense/plugins master $commit (MK_FROM=upstream)."
+	"Built from Org/repo, vendor/v, commit abcdef0123456789abcdef0123456789abcdef01 (workflow run at feedface), in opnsense/plugins master $fwhead (MK_FROM=upstream)."
 expect_fail "build: this repository's package from a shallow checkout" \
 	bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface STUB_GIT_SHALLOW=1 -- build-package.sh os-vendor
 expect_fail "build: this repository's package without GITHUB_SHA" \
@@ -1035,6 +1063,18 @@ expect_eq "build: PLUGIN_HASH is the source commit's nine digits, without an app
 expect_eq "build commit: PLUGIN_DEVEL= is still passed" "$(rg -c -w 'PLUGIN_DEVEL=' "$W/make.args")" "1"
 expect_eq "build commit: none given builds the head of main" "$(cat "$W/out/source")" "Built from Org/plugins, net/alpha, commit $commit, in opnsense/plugins $pin."
 expect_fail "build: a commit not on main is refused" bp STUB_PKGS=os-alpha-1.1.pkg STUB_GIT_OFF_BRANCH=1 -- build-package.sh os-alpha "$ok"
+bp STUB_PKGS=os-alpha-1.1.pkg "STUB_GIT_LOG=$W/git.log" -- build-package.sh os-alpha "$ok" >/dev/null
+expect_eq "build: the branch history fetched is main's, into refs/remotes/origin/main" \
+	"$(grep -cxF -- 'fetch --quiet --unshallow origin +refs/heads/main:refs/remotes/origin/main' "$W/git.log")" "1"
+expect_eq "build: the ancestry check asks about the checked-out commit and origin/main" \
+	"$(grep -cxF -- "merge-base --is-ancestor $ok refs/remotes/origin/main" "$W/git.log")" "1"
+# mutation: an ancestry check against HEAD (always true in real git) must make the stub refuse the build
+sed 's#--is-ancestor "$commit" "refs/remotes/origin/$branch"#--is-ancestor "$commit" HEAD#' "$root/scripts/build-package.sh" >"$W/scripts/build-package.sh"
+expect_eq "build: the mutant (ancestry against HEAD) differs from the script" \
+	"$(cmp -s "$W/scripts/build-package.sh" "$root/scripts/build-package.sh" && echo same || echo differs)" "differs"
+expect_fail "build: a commit not on main is refused even for a mutant whose ancestry check is against HEAD" \
+	bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha "$ok"
+cp "$root/scripts/build-package.sh" "$W/scripts/build-package.sh"
 expect_fail "build commit: checkout lands elsewhere" bp STUB_PKGS=os-alpha-1.1.pkg "STUB_GIT_CHECKOUT_AS=$other" -- build-package.sh os-alpha "$ok"
 expect_fail "build commit: not 40 hex digits" bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha abc123
 expect_fail "build commit: upper case" bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha "$(echo "$ok" | tr a-f A-F)"
@@ -2875,7 +2915,7 @@ err=$(odr 2>&1 >/dev/null)
 expect_eq "out-dir: a file name the VM chose stays on the script's own line" "$(wc -l <<<"$err" | tr -d ' ') ${err:0:11}" "1 out-dir.sh:"
 expect_fail "out-dir: usage" bash "$root/scripts/out-dir.sh" os-alpha
 # what build-package.sh writes passes, for a plugin row and for this repository's row
-conf 'os-alpha   Org/plugins br-alpha net/alpha yes' 'os-vendor  .           main     vendor/v  yes'
+conf 'os-alpha   Org/plugins main net/alpha yes' 'os-vendor  .           main     vendor/v  yes'
 vmdir
 vmenv UPSTREAM_PHP=85 UPSTREAM_PYTHON=313 STUB_GIT_DIRS=net/alpha STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha "$ok" >/dev/null
 expect_eq "out-dir: build-package.sh's output for a plugin" "$(bash "$root/scripts/out-dir.sh" os-alpha "$W/out")" "$W/out/os-alpha-1.1.pkg"
@@ -2994,8 +3034,10 @@ ps "$T/fresh" "$v_head" os-vendor "$T/src" >/dev/null 2>&1 || bad "plugin-source
 expect_eq "plugin-source: a replace ref does not change the export" "$(cat "$T/src/vendor/v/Makefile")" "PLUGIN_NAME= v"
 gitq -C "$T/fresh" replace -d "$blob"
 # refusals: an entry that is no file or link (a submodule), a directory that names a file, a commit without it
-conf 'os-vendor  .  main  vendor/v  yes' 'os-file  .  main  vendor/v/Makefile  yes' 'os-none  .  main  vendor/none  yes'
+conf 'os-vendor  .  main  vendor/v  yes' 'os-file  .  main  vendor/vfile  yes' 'os-none  .  main  vendor/none  yes'
 gitq -C "$T/fresh" update-index --add --cacheinfo "160000,$v_head,vendor/v/sub"
+printf 'x\n' >"$T/fresh/vendor/vfile"
+gitq -C "$T/fresh" add vendor/vfile
 gitq -C "$T/fresh" commit -qm submodule
 v_sub=$(git -C "$T/fresh" rev-parse HEAD)
 rm -rf "$T/src"
@@ -3003,7 +3045,7 @@ expect_eq "plugin-source: a submodule entry is refused" "$(ps "$T/fresh" "$v_sub
 	"plugin-source.sh: vendor/v/sub: a commit of mode 160000 is not supported"
 rm -rf "$T/src"
 expect_eq "plugin-source: a path outside the directory is refused" "$(ps "$T/fresh" "$v_sub" os-file "$T/src" 2>&1 >/dev/null)" \
-	"plugin-source.sh: vendor/v/Makefile is not under vendor/v/Makefile"
+	"plugin-source.sh: vendor/vfile is not under vendor/vfile"
 rm -rf "$T/src"
 expect_eq "plugin-source: a commit without the directory is refused" "$(ps "$T/fresh" "$v_sub" os-none "$T/src" 2>&1 >/dev/null)" \
 	"plugin-source.sh: the commit $v_sub has no vendor/none"

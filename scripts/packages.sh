@@ -16,13 +16,15 @@ die() {
 }
 
 # The data lines, validated: five fields; a package name without "-<digit>", so
-# "<name>-<digit>" starts only that package's release tags; catalogue yes or no;
+# "<name>-<digit>" starts only that package's release tags; a directory of exactly
+# <category>/<name> (it is a path between two trees); catalogue yes or no;
 # no package twice.
 rows() {
 	awk '
 		/^[[:space:]]*(#|$)/ { next }
 		NF != 5 { printf "line %d: expected 5 fields, got %d\n", NR, NF > "/dev/stderr"; bad = 1; next }
 		$1 !~ /^[a-z0-9]+(-[a-z][a-z0-9]*)*$/ { printf "line %d: bad package name %s\n", NR, $1 > "/dev/stderr"; bad = 1; next }
+		$4 !~ /^[a-z0-9-]+\/[a-z0-9-]+$/ { printf "line %d: the directory must be <category>/<name>, not %s\n", NR, $4 > "/dev/stderr"; bad = 1; next }
 		$5 != "yes" && $5 != "no" { printf "line %d: catalogue must be yes or no, not %s\n", NR, $5 > "/dev/stderr"; bad = 1; next }
 		seen[$1]++ { printf "line %d: %s is listed twice\n", NR, $1 > "/dev/stderr"; bad = 1; next }
 		{ print $1, $2, $3, $4, $5 }

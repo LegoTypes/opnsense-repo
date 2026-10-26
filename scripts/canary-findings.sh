@@ -3,7 +3,7 @@
 # One package's canary findings, from what the canary gathered in <dir>:
 #   published.pkg, notes          its newest release and that release's notes
 #   fresh.pkg, fresh.source       a build of the branch head as a publish would make it
-#   rebased.pkg                   the same with opnsense/plugins master's Mk/
+#   rebased.pkg                   the same in opnsense/plugins master's head, not the pin
 #   fresh.tail, rebased.tail      the end of a failed build's log, instead of its .pkg
 # Prints "MATERIAL: ..." lines (a rebuild, a rebase or a look is needed) and
 # "NOTE: ..." lines (for information). Exits 1 if any line is MATERIAL.
@@ -32,7 +32,7 @@ failed() {
 
 # a failed build is material whether or not there is a release to compare with
 [[ -f $d/fresh.pkg ]] || failed "building the branch as a publish would failed" "$d/fresh.tail"
-[[ -f $d/rebased.pkg ]] || failed "building with upstream Mk/ failed" "$d/rebased.tail"
+[[ -f $d/rebased.pkg ]] || failed "building in upstream master's framework failed" "$d/rebased.tail"
 if [[ ! -f $d/published.pkg ]]; then
 	say NOTE "$pkg has no release yet; nothing to compare"
 	exit "$material"
@@ -60,7 +60,7 @@ if [[ -f $d/rebased.pkg ]]; then
 	if ((rc > 1)); then
 		say MATERIAL "the build with upstream Mk/ could not be compared with the release"
 	fi
-	# a rebased difference is Mk/'s doing only when the as-published build was compared and lacks it
+	# a rebased difference is upstream's doing (Mk/, Keywords/, Templates/, Scripts/) only when the as-published build was compared and lacks it
 	while IFS= read -r l; do
 		[[ -n $l ]] || continue
 		if [[ $as_ok == yes ]]; then

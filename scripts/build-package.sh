@@ -65,6 +65,10 @@ else
 	git -C "$tree" checkout --quiet FETCH_HEAD
 	fwline="opnsense/plugins $framework"
 fi
+# the package directory must be the plugin's alone: nothing the framework holds may be built or nested into
+if [ -e "$tree/$dir" ] || [ -L "$tree/$dir" ]; then
+	die "the framework ($fwline) already has $dir"
+fi
 mkdir -p "$tree/$(dirname "$dir")"
 
 if [ "$repo" = . ]; then
@@ -72,6 +76,7 @@ if [ "$repo" = . ]; then
 		die "GITHUB_REPOSITORY and GITHUB_SHA must name the commit of $package"
 	[ -z "$commit" ] || [ "$commit" = "$GITHUB_SHA" ] ||
 		die "the commit $commit is not the workflow run's commit $GITHUB_SHA"
+	[ -d "$dir" ] && [ -z "$(find "$dir" -type l)" ] || die "$dir is not a directory, or holds a symbolic link"
 	cp -R "$dir" "$tree/$dir"
 	# the workspace synced into the VM keeps the runner's owner, so git needs it named safe
 	changed=$(git -c safe.directory="$PWD" log -1 --format=%H -- "$dir")
@@ -91,6 +96,7 @@ else
 			die "the commit $commit is not on branch $branch of $repo"
 	fi
 	[ -d "$src/$dir" ] || die "$repo has no $dir at commit $(git -C "$src" rev-parse HEAD)"
+	[ ! -L "$src/$dir" ] && [ -z "$(find "$src/$dir" -type l)" ] || die "$dir at commit $(git -C "$src" rev-parse HEAD) holds a symbolic link"
 	cp -R "$src/$dir" "$tree/$dir"
 	srccommit=$(git -C "$src" rev-parse HEAD)
 	source="Built from $repo, $dir, commit $srccommit, in"

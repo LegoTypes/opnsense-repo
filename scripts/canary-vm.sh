@@ -1,6 +1,6 @@
 #!/bin/sh
 # In the FreeBSD VM, for the canary: build every catalogue package twice, as a
-# publish would (fresh) and with opnsense/plugins master's Mk/ (rebased), into
+# publish would (fresh) and in opnsense/plugins master's head instead of the pinned framework (rebased), into
 # canary/<package>/: fresh.pkg, fresh.source, rebased.pkg, or for a failed build
 # <variant>.log (its whole log, kept for the run's artifact) and <variant>.tail
 # (its end, for the issue). Every package and variant is attempted; a failure
