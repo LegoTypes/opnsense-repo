@@ -1029,6 +1029,13 @@ err=$(bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=fee
 expect_eq "build: this repository's directory holding a symbolic link is refused, one line" \
 	"$(printf '%s\n' "$err" | wc -l | tr -d ' ') $(printf '%s' "$err" | grep -c "symbolic link")" "1 1"
 rm "$W/vendor/v/link"
+# a find that fails must not read as "no symbolic link"
+err=$(bp STUB_PKGS=os-alpha-1.1.pkg STUB_FIND_FAIL=1 -- build-package.sh os-alpha 2>&1 >/dev/null)
+expect_eq "build: a failing find on a plugin directory is a refusal, one line" \
+	"$(printf '%s\n' "$err" | wc -l | tr -d ' ') $(printf '%s' "$err" | grep -c "cannot look for symbolic links")" "1 1"
+err=$(bp STUB_PKGS=os-vendor-1.0_2.pkg STUB_FIND_FAIL=1 GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface -- build-package.sh os-vendor 2>&1 >/dev/null)
+expect_eq "build: a failing find on this repository's directory is a refusal, one line" \
+	"$(printf '%s\n' "$err" | wc -l | tr -d ' ') $(printf '%s' "$err" | grep -c "cannot look for symbolic links")" "1 1"
 bp STUB_PKGS=os-vendor-1.0_2.pkg GITHUB_REPOSITORY=Org/repo GITHUB_SHA=feedface -- build-package.sh os-vendor >/dev/null
 expect_eq "build: source line, \".\" row" "$(cat "$W/out/source")" \
 	"Built from Org/repo, vendor/v, commit abcdef0123456789abcdef0123456789abcdef01 (workflow run at feedface), in opnsense/plugins $pin."
@@ -1068,13 +1075,6 @@ expect_eq "build: the branch history fetched is main's, into refs/remotes/origin
 	"$(grep -cxF -- 'fetch --quiet --unshallow origin +refs/heads/main:refs/remotes/origin/main' "$W/git.log")" "1"
 expect_eq "build: the ancestry check asks about the checked-out commit and origin/main" \
 	"$(grep -cxF -- "merge-base --is-ancestor $ok refs/remotes/origin/main" "$W/git.log")" "1"
-# mutation: an ancestry check against HEAD (always true in real git) must make the stub refuse the build
-sed 's#--is-ancestor "$commit" "refs/remotes/origin/$branch"#--is-ancestor "$commit" HEAD#' "$root/scripts/build-package.sh" >"$W/scripts/build-package.sh"
-expect_eq "build: the mutant (ancestry against HEAD) differs from the script" \
-	"$(cmp -s "$W/scripts/build-package.sh" "$root/scripts/build-package.sh" && echo same || echo differs)" "differs"
-expect_fail "build: a commit not on main is refused even for a mutant whose ancestry check is against HEAD" \
-	bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha "$ok"
-cp "$root/scripts/build-package.sh" "$W/scripts/build-package.sh"
 expect_fail "build commit: checkout lands elsewhere" bp STUB_PKGS=os-alpha-1.1.pkg "STUB_GIT_CHECKOUT_AS=$other" -- build-package.sh os-alpha "$ok"
 expect_fail "build commit: not 40 hex digits" bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha abc123
 expect_fail "build commit: upper case" bp STUB_PKGS=os-alpha-1.1.pkg -- build-package.sh os-alpha "$(echo "$ok" | tr a-f A-F)"

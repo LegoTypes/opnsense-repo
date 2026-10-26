@@ -1,0 +1,4 @@
+#!/bin/sh
+# find, except that it fails (exit 2, no output) when STUB_FIND_FAIL is set, as on an unreadable directory.
+[ -z "${STUB_FIND_FAIL:-}" ] || exit 2
+exec /usr/bin/find "$@"
